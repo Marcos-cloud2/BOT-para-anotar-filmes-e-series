@@ -211,16 +211,26 @@ aba Actions, sem afetar o bot, e você continua fazendo deploy manual com
 
 ### Sobre a lista salva (importante saber)
 
-O bot guarda a lista de filmes/séries num arquivo local `filmes.db`
-(um banco SQLite simples) dentro da própria máquina do Fly.io. Isso quer
-dizer que a lista persiste entre reinicializações normais do bot, mas se a
-máquina for destruída e recriada do zero (por exemplo, se você mudar de
-região ou recriar o app), o banco se perde junto.
+O bot guarda a lista de filmes/séries num arquivo `filmes.db` (um banco
+SQLite simples). No Fly.io, esse arquivo precisa morar num **volume
+persistente** — sem isso, cada novo deploy recria a máquina do zero e
+apaga tudo que foi salvo em execução. O `fly.toml` deste projeto já vem
+configurado para isso (bloco `[mounts]` montando o volume em `/data`, e
+`DB_PATH=/data/filmes.db`), mas o volume em si **precisa ser criado uma
+vez**, manualmente, antes do primeiro deploy:
 
-Para uso pessoal isso raramente é um problema, mas se quiser manter a
-lista permanente e resistente mesmo a esses casos, dá pra trocar o SQLite
-por um banco de dados externo gratuito (Postgres free tier do próprio
-Fly.io, Supabase, etc.).
+```bash
+flyctl volumes create filmes_data --region gru --size 1
+```
+
+(`gru` = São Paulo; troque pela região que você usou no `flyctl launch`.
+1 GB é bem mais que suficiente pra esse uso.) Depois disso, `flyctl
+deploy` já anexa o volume automaticamente graças ao `fly.toml`.
+
+Se você pulou esse passo e o `/lista` apareceu vazio depois de um deploy,
+foi exatamente isso: o banco antigo ficou preso numa máquina que já não
+existe mais. Crie o volume com o comando acima, rode `flyctl deploy` de
+novo, e a partir daí a lista passa a sobreviver a qualquer deploy futuro.
 
 ## Como usar o bot no dia a dia
 
