@@ -100,13 +100,15 @@ HELP_TEXT = (
     "/lista - navegar pelo que falta assistir (escolhe por plataforma ou "
     "por genero, depois vai afunilando ate o titulo)\n"
     "/assistidos - navegar pelo que ja foi assistido\n"
+    "/historico - ver itens removidos e restaurar se quiser\n"
     "/detalhes &lt;id&gt; - ver todos os detalhes de um item pelo numero\n"
     "/marcar &lt;id&gt; - marcar como assistido\n"
     "/desmarcar &lt;id&gt; - voltar pra lista de assistir\n"
     "/renomear &lt;id&gt; &lt;nome certo&gt; - corrigir o titulo\n"
-    "/remover &lt;id&gt; - apagar da lista\n\n"
+    "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n\n"
     "Tambem da pra marcar, desmarcar e remover direto pelos botoes que "
-    "aparecem no /lista e no /assistidos."
+    "aparecem no /lista e no /assistidos — marcar como assistido e remover "
+    "sempre pedem confirmacao antes de executar."
 )
 
 
@@ -258,7 +260,7 @@ def find_duplicate(chat_id: int, title: str):
         return None
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM items WHERE chat_id = ?", (chat_id,)
+        "SELECT * FROM items WHERE chat_id = ? AND status != 'removido'", (chat_id,)
     ).fetchall()
     conn.close()
     for row in rows:
@@ -390,9 +392,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 #   modo "f" (plataforma primeiro): plataforma -> categoria -> genero
 #   modo "g" (genero primeiro):     genero -> categoria -> plataforma
 
-STATUS_BY_KEY = {"p": "para assistir", "a": "assistido"}
+STATUS_BY_KEY = {"p": "para assistir", "a": "assistido", "r": "removido"}
 KEY_BY_STATUS = {v: k for k, v in STATUS_BY_KEY.items()}
-LIST_TITLES = {"p": "🍿 Para assistir", "a": "✅ Ja assistidos"}
+LIST_TITLES = {"p": "🍿 Para assistir", "a": "✅ Ja assistidos", "r": "🗑 Historico de removidos"}
 
 DIM_ORDER = {"f": ["plat", "cat", "genre"], "g": ["genre", "cat", "plat"]}
 DIM_ICON = {"plat": "📺", "cat": None, "genre": "🏷"}  # cat usa MEDIA_TYPE_ICON
@@ -506,40 +508,82 @@ def breadcrumb_text(breadcrumb: list) -> str:
     return " · ".join(f"{dim_icon(d, v)} {html.escape(v)}" for d, v in breadcrumb)
 
 
-def build_detail_view(row: sqlite3.Row, path: tuple):
-    status_key, mode, indices = path
-    date_str = row["created_at"][:10] if row["created_at"] else "?"
-    status_label = "Assistido ✅" if row["status"] == "assistido" else "Para assistir 🍿"
+STATUS_LABEL = {
+    "para assistir": "Para assistir 🍿",
+    "assistido": "Assistido ✅",
+    "removido": "Removido 🗑",
+}
 
+
+def item_detail_text(row: sqlite3.Row) -> str:
+    date_str = row["created_at"][:10] if row["created_at"] else "?"
     lines = [f"🎬 <b>{html.escape(row['title'])}</b> (#{row['id']})"]
     tags = [t for t in [category_of(row), row["genre"]] if t]
     if tags:
         lines.append("🏷 " + html.escape(" · ".join(tags)))
     if row["rating"] and row["rating"].lower() not in ("nao encontrado", "não encontrado"):
         lines.append(f"⭐ Nota: {html.escape(row['rating'])}")
-    lines.append(f"Status: {status_label}")
+    lines.append(f"Status: {STATUS_LABEL.get(row['status'], row['status'])}")
     lines.append(f"Adicionado em: {date_str}")
     if row["synopsis"]:
         lines.append(f"\n📖 {html.escape(row['synopsis'])}")
     if row["where_to_watch"] and row["where_to_watch"].lower() not in ("nao encontrado", "não encontrado"):
         lines.append(f"\n📺 <b>Onde assistir:</b> {html.escape(row['where_to_watch'])}")
-    text = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def build_detail_view(row: sqlite3.Row, path: tuple):
+    status_key, mode, indices = path
+    text = item_detail_text(row)
 
     idx_suffix = "|".join(str(i) for i in indices)
     suffix = f"{row['id']}|{status_key}|{mode}|{idx_suffix}"
-    toggle_button = (
-        InlineKeyboardButton("↩️ Desmarcar", callback_data=f"u|{suffix}")
-        if row["status"] == "assistido"
-        else InlineKeyboardButton("✅ Marcar como assistido", callback_data=f"m|{suffix}")
-    )
+    back_button = InlineKeyboardButton("⬅️ Voltar", callback_data=nav_callback(status_key, mode, indices))
+
+    if row["status"] == "assistido":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("↩️ Desmarcar", callback_data=f"u|{suffix}")],
+                [InlineKeyboardButton("🗑 Remover", callback_data=f"cx|{suffix}")],
+                [back_button],
+            ]
+        )
+    elif row["status"] == "removido":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("♻️ Restaurar", callback_data=f"dr|{suffix}")],
+                [back_button],
+            ]
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Marcar como assistido", callback_data=f"cm|{suffix}")],
+                [InlineKeyboardButton("🗑 Remover", callback_data=f"cx|{suffix}")],
+                [back_button],
+            ]
+        )
+    return text, keyboard
+
+
+def build_confirm_view(row: sqlite3.Row, action: str, suffix: str):
+    if action == "m":
+        question = f"Confirma marcar <b>{html.escape(row['title'])}</b> como assistido?"
+        yes_label, yes_cb = "✅ Sim, marcar", f"dm|{suffix}"
+    else:
+        question = (
+            f"Confirma remover <b>{html.escape(row['title'])}</b> da lista?\n"
+            f"<i>Fica guardado no /historico, da pra restaurar depois.</i>"
+        )
+        yes_label, yes_cb = "🗑 Sim, remover", f"dx|{suffix}"
+
     keyboard = InlineKeyboardMarkup(
         [
-            [toggle_button],
-            [InlineKeyboardButton("🗑 Remover", callback_data=f"x|{suffix}")],
-            [InlineKeyboardButton("⬅️ Voltar", callback_data=nav_callback(status_key, mode, indices))],
+            [InlineKeyboardButton(yes_label, callback_data=yes_cb)],
+            [InlineKeyboardButton("↩️ Cancelar", callback_data=f"v|{suffix}")],
         ]
     )
-    return text, keyboard
+    return f"⚠️ {question}", keyboard
 
 
 async def send_list(update: Update, chat_id: int, status_key: str) -> None:
@@ -560,6 +604,10 @@ async def lista(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def assistidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_list(update, update.effective_chat.id, "a")
+
+
+async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_list(update, update.effective_chat.id, "r")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -625,13 +673,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
-        if action in ("m", "u", "x"):
+        if action in ("cm", "cx"):
+            item_id = int(parts[1])
+            suffix = "|".join(parts[1:])
+            conn = get_conn()
+            row = conn.execute(
+                "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+            ).fetchone()
+            conn.close()
+            await query.answer()
+            if not row:
+                await query.edit_message_text("Nao achei esse item (pode ter sido removido).")
+                return
+            confirm_action = "m" if action == "cm" else "x"
+            text, keyboard = build_confirm_view(row, confirm_action, suffix)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+
+        if action in ("dm", "u", "dx", "dr"):
             item_id = int(parts[1])
             status_key, mode = parts[2], parts[3]
             indices = [int(p) for p in parts[4:]]
 
             conn = get_conn()
-            if action == "m":
+            if action == "dm":
                 conn.execute(
                     "UPDATE items SET status = 'assistido' WHERE id = ? AND chat_id = ?",
                     (item_id, chat_id),
@@ -645,21 +710,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 conn.commit()
                 await query.answer("Voltou pra lista de assistir 🍿")
-            else:
+            elif action == "dx":
                 conn.execute(
-                    "DELETE FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+                    "UPDATE items SET status = 'removido' WHERE id = ? AND chat_id = ?",
+                    (item_id, chat_id),
                 )
                 conn.commit()
-                conn.close()
                 await query.answer("Removido 🗑")
-                await query.edit_message_text("🗑 Item removido da lista.")
-                return
+            else:  # dr - restaurar do historico
+                conn.execute(
+                    "UPDATE items SET status = 'para assistir' WHERE id = ? AND chat_id = ?",
+                    (item_id, chat_id),
+                )
+                conn.commit()
+                await query.answer("Restaurado ♻️")
 
             row = conn.execute(
                 "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
             ).fetchone()
             conn.close()
-            text, keyboard = build_detail_view(row, (status_key, mode, indices))
+            # A acao pode mudar o status do item pra fora da lista onde ele estava
+            # (ex: removido some do "p"/"a"); manda pra tela de detalhes do novo status.
+            new_status_key = KEY_BY_STATUS.get(row["status"], status_key)
+            path = (new_status_key, mode, indices) if new_status_key == status_key else resolve_path_for_row(chat_id, row, mode)
+            text, keyboard = build_detail_view(row, path)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
@@ -789,14 +863,17 @@ async def remover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     conn = get_conn()
     cur = conn.execute(
-        "DELETE FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+        "UPDATE items SET status = 'removido' WHERE id = ? AND chat_id = ? AND status != 'removido'",
+        (item_id, chat_id),
     )
     conn.commit()
     changed = cur.rowcount
     conn.close()
 
     if changed:
-        await update.message.reply_text(f"Removido #{item_id}")
+        await update.message.reply_text(
+            f"Removido #{item_id} 🗑 (fica guardado no /historico, da pra restaurar depois)"
+        )
     else:
         await update.message.reply_text("Nao achei esse ID na sua lista.")
 
@@ -813,6 +890,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("assistidos", assistidos))
+    app.add_handler(CommandHandler("historico", historico))
     app.add_handler(CommandHandler("detalhes", detalhes))
     app.add_handler(CommandHandler("marcar", marcar))
     app.add_handler(CommandHandler("desmarcar", desmarcar))

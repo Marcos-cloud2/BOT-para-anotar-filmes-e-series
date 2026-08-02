@@ -246,8 +246,14 @@ pra abrir os detalhes daquele item.
   - Em qualquer um dos dois caminhos, só aparecem as opções que você
     realmente tem cadastradas — nada de categoria ou plataforma vazia.
 - `/assistidos` funciona do mesmo jeito, mas para o que você já assistiu.
+- `/historico` mostra os itens removidos, com opção de restaurar.
 - Ao tocar num título, aparece a sinopse completa, a nota, onde assistir, e
-  botões para marcar como assistido, desmarcar ou remover.
+  botões pra marcar como assistido ou remover. **Essas duas ações sempre
+  pedem confirmação antes de executar** ("Sim" / "Cancelar"), pra evitar
+  toque acidental. Desmarcar não pede confirmação, já que é uma ação
+  reversível e de baixo risco.
+- Remover não apaga de vez: o item vai pro `/historico`, de onde dá pra
+  restaurar a qualquer momento com o botão "♻️ Restaurar".
 
 **Comandos diretos (sem precisar navegar pelos botões):**
 - `/detalhes <id>` — mostra todos os detalhes de um item pelo número dele.
@@ -255,7 +261,9 @@ pra abrir os detalhes daquele item.
 - `/desmarcar <id>` — volta o item para a lista de "para assistir".
 - `/renomear <id> <nome certo>` — corrige o título, caso a IA tenha
   identificado errado.
-- `/remover <id>` — apaga o item de vez.
+- `/remover <id>` — remove da lista (vai pro `/historico`, não apaga de vez).
+  Diferente do botão, o comando direto não pede confirmação — digitar o ID
+  exato já é uma ação deliberada.
 
 O número (`<id>`) de cada item aparece nas telas de detalhes e nas mensagens
 de confirmação quando você adiciona algo novo.
