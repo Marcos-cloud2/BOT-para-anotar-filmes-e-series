@@ -97,8 +97,8 @@ HELP_TEXT = (
     "identifico tipo, genero, nota, sinopse e onde assistir, e anoto na sua "
     "lista.\n\n"
     "<b>Comandos</b>\n"
-    "/lista - navegar pelo que falta assistir (plataforma → categoria → "
-    "genero → titulo)\n"
+    "/lista - navegar pelo que falta assistir (escolhe por plataforma ou "
+    "por genero, depois vai afunilando ate o titulo)\n"
     "/assistidos - navegar pelo que ja foi assistido\n"
     "/detalhes &lt;id&gt; - ver todos os detalhes de um item pelo numero\n"
     "/marcar &lt;id&gt; - marcar como assistido\n"
@@ -382,11 +382,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await save_item(update, chat_id, title, data)
 
 
-# --- Navegacao interativa: Plataforma -> Categoria -> Genero -> Titulo -----
+# --- Navegacao interativa: por Plataforma ou por Genero --------------------
+#
+# O usuario escolhe primeiro o modo (plataforma ou genero) e depois vai
+# afunilando por botoes ate chegar no titulo. Cada modo percorre as mesmas
+# 3 dimensoes (plataforma, categoria, genero) em ordens diferentes:
+#   modo "f" (plataforma primeiro): plataforma -> categoria -> genero
+#   modo "g" (genero primeiro):     genero -> categoria -> plataforma
 
 STATUS_BY_KEY = {"p": "para assistir", "a": "assistido"}
 KEY_BY_STATUS = {v: k for k, v in STATUS_BY_KEY.items()}
 LIST_TITLES = {"p": "🍿 Para assistir", "a": "✅ Ja assistidos"}
+
+DIM_ORDER = {"f": ["plat", "cat", "genre"], "g": ["genre", "cat", "plat"]}
+DIM_ICON = {"plat": "📺", "cat": None, "genre": "🏷"}  # cat usa MEDIA_TYPE_ICON
+DIM_LABEL = {"plat": "plataforma", "cat": "categoria", "genre": "genero"}
+MODE_LABEL = {"f": "Por plataforma", "g": "Por genero"}
 
 
 def fetch_rows(chat_id: int, status_key: str) -> list:
@@ -400,100 +411,103 @@ def fetch_rows(chat_id: int, status_key: str) -> list:
     return rows
 
 
-def rows_in_platform(rows: list, platform: str) -> list:
-    return [r for r in rows if platform_of(r) == platform]
+def dim_values(dim: str, rows: list) -> list:
+    if dim == "plat":
+        return unique_sorted(platform_of(r) for r in rows)
+    if dim == "cat":
+        return unique_sorted(category_of(r) for r in rows)
+    genres = set()
+    for r in rows:
+        genres.update(genres_of(r))
+    return unique_sorted(genres)
 
 
-def rows_in_category(rows: list, category: str) -> list:
-    return [r for r in rows if category_of(r) == category]
+def dim_filter(dim: str, value: str, rows: list) -> list:
+    if dim == "plat":
+        return [r for r in rows if platform_of(r) == value]
+    if dim == "cat":
+        return [r for r in rows if category_of(r) == value]
+    return [r for r in rows if value in genres_of(r)]
 
 
-def rows_in_genre(rows: list, genre: str) -> list:
-    return [r for r in rows if genre in genres_of(r)]
+def dim_icon(dim: str, value: str) -> str:
+    if dim == "cat":
+        return MEDIA_TYPE_ICON.get(value, "🎞")
+    return DIM_ICON[dim]
 
 
 class NavError(Exception):
     pass
 
 
-def resolve_platform(rows: list, pidx: int):
-    platforms = unique_sorted(platform_of(r) for r in rows)
-    if pidx < 0 or pidx >= len(platforms):
-        raise NavError()
-    platform = platforms[pidx]
-    return platform, rows_in_platform(rows, platform)
+def resolve_nav(rows: list, mode: str, indices: list):
+    """Aplica os filtros das dimensoes ja escolhidas. Retorna (breadcrumb, rows_filtradas)."""
+    dims = DIM_ORDER[mode]
+    breadcrumb = []
+    current = rows
+    for dim, idx in zip(dims, indices):
+        values = dim_values(dim, current)
+        if idx < 0 or idx >= len(values):
+            raise NavError()
+        value = values[idx]
+        breadcrumb.append((dim, value))
+        current = dim_filter(dim, value, current)
+    return breadcrumb, current
 
 
-def resolve_category(rows: list, cidx: int):
-    categories = unique_sorted(category_of(r) for r in rows)
-    if cidx < 0 or cidx >= len(categories):
-        raise NavError()
-    category = categories[cidx]
-    return category, rows_in_category(rows, category)
+def nav_callback(status_key: str, mode: str, indices: list) -> str:
+    parts = ["n", status_key, mode] + [str(i) for i in indices]
+    return "|".join(parts)
 
 
-def resolve_genre(rows: list, gidx: int):
-    genres = set()
-    for r in rows:
-        genres.update(genres_of(r))
-    genres = unique_sorted(genres)
-    if gidx < 0 or gidx >= len(genres):
-        raise NavError()
-    genre = genres[gidx]
-    return genre, rows_in_genre(rows, genre)
+def kb_root(status_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📺 Por plataforma", callback_data=f"n|{status_key}|f")],
+            [InlineKeyboardButton("🏷 Por genero", callback_data=f"n|{status_key}|g")],
+        ]
+    )
 
 
-def kb_platforms(status_key: str, rows: list) -> InlineKeyboardMarkup:
-    platforms = unique_sorted(platform_of(r) for r in rows)
-    buttons = [
-        [InlineKeyboardButton(f"📺 {p}", callback_data=f"lc|{status_key}|{i}")]
-        for i, p in enumerate(platforms)
-    ]
-    return InlineKeyboardMarkup(buttons)
-
-
-def kb_categories(status_key: str, pidx: int, rows: list) -> InlineKeyboardMarkup:
-    categories = unique_sorted(category_of(r) for r in rows)
+def kb_dim_options(status_key: str, mode: str, indices: list, rows: list) -> InlineKeyboardMarkup:
+    dims = DIM_ORDER[mode]
+    dim = dims[len(indices)]
+    values = dim_values(dim, rows)
     buttons = [
         [
             InlineKeyboardButton(
-                f"{MEDIA_TYPE_ICON.get(c, '🎞')} {c}", callback_data=f"lg|{status_key}|{pidx}|{i}"
+                f"{dim_icon(dim, v)} {v}",
+                callback_data=nav_callback(status_key, mode, indices + [i]),
             )
         ]
-        for i, c in enumerate(categories)
+        for i, v in enumerate(values)
     ]
-    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"lp|{status_key}")])
+    back_cb = f"root|{status_key}" if not indices else nav_callback(status_key, mode, indices[:-1])
+    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
     return InlineKeyboardMarkup(buttons)
 
 
-def kb_genres(status_key: str, pidx: int, cidx: int, rows: list) -> InlineKeyboardMarkup:
-    genres = set()
-    for r in rows:
-        genres.update(genres_of(r))
-    genres = unique_sorted(genres)
-    buttons = [
-        [InlineKeyboardButton(f"🏷 {g}", callback_data=f"li|{status_key}|{pidx}|{cidx}|{i}")]
-        for i, g in enumerate(genres)
-    ]
-    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"lc|{status_key}|{pidx}")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def kb_items(status_key: str, pidx: int, cidx: int, gidx: int, rows: list) -> InlineKeyboardMarkup:
+def kb_items(status_key: str, mode: str, indices: list, rows: list) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
-                item_button_label(r), callback_data=f"v|{r['id']}|{status_key}|{pidx}|{cidx}|{gidx}"
+                item_button_label(r),
+                callback_data=f"v|{r['id']}|{status_key}|{mode}|" + "|".join(str(i) for i in indices),
             )
         ]
         for r in rows
     ]
-    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=f"lg|{status_key}|{pidx}|{cidx}")])
+    back_cb = nav_callback(status_key, mode, indices[:-1])
+    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
     return InlineKeyboardMarkup(buttons)
 
 
+def breadcrumb_text(breadcrumb: list) -> str:
+    return " · ".join(f"{dim_icon(d, v)} {html.escape(v)}" for d, v in breadcrumb)
+
+
 def build_detail_view(row: sqlite3.Row, path: tuple):
-    status_key, pidx, cidx, gidx = path
+    status_key, mode, indices = path
     date_str = row["created_at"][:10] if row["created_at"] else "?"
     status_label = "Assistido ✅" if row["status"] == "assistido" else "Para assistir 🍿"
 
@@ -511,7 +525,8 @@ def build_detail_view(row: sqlite3.Row, path: tuple):
         lines.append(f"\n📺 <b>Onde assistir:</b> {html.escape(row['where_to_watch'])}")
     text = "\n".join(lines)
 
-    suffix = f"{row['id']}|{status_key}|{pidx}|{cidx}|{gidx}"
+    idx_suffix = "|".join(str(i) for i in indices)
+    suffix = f"{row['id']}|{status_key}|{mode}|{idx_suffix}"
     toggle_button = (
         InlineKeyboardButton("↩️ Desmarcar", callback_data=f"u|{suffix}")
         if row["status"] == "assistido"
@@ -521,7 +536,7 @@ def build_detail_view(row: sqlite3.Row, path: tuple):
         [
             [toggle_button],
             [InlineKeyboardButton("🗑 Remover", callback_data=f"x|{suffix}")],
-            [InlineKeyboardButton("⬅️ Voltar", callback_data=f"li|{status_key}|{pidx}|{cidx}|{gidx}")],
+            [InlineKeyboardButton("⬅️ Voltar", callback_data=nav_callback(status_key, mode, indices))],
         ]
     )
     return text, keyboard
@@ -534,8 +549,8 @@ async def send_list(update: Update, chat_id: int, status_key: str) -> None:
         await update.message.reply_html(f"{title}\n\n<i>Vazio por aqui.</i>")
         return
     await update.message.reply_html(
-        f"{title}\n\nEscolha a plataforma:",
-        reply_markup=kb_platforms(status_key, rows),
+        f"{title}\n\nVoce gostaria de assistir por plataforma ou por genero?",
+        reply_markup=kb_root(status_key),
     )
 
 
@@ -554,7 +569,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action = parts[0]
 
     try:
-        if action == "lp":
+        if action == "root":
             status_key = parts[1]
             rows = fetch_rows(chat_id, status_key)
             await query.answer()
@@ -562,55 +577,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_text(f"{LIST_TITLES[status_key]}\n\nVazio por aqui.")
                 return
             await query.edit_message_text(
-                f"{LIST_TITLES[status_key]}\n\nEscolha a plataforma:",
-                reply_markup=kb_platforms(status_key, rows),
+                f"{LIST_TITLES[status_key]}\n\nVoce gostaria de assistir por plataforma ou por genero?",
+                reply_markup=kb_root(status_key),
             )
             return
 
-        if action == "lc":
-            status_key, pidx = parts[1], int(parts[2])
+        if action == "n":
+            status_key, mode = parts[1], parts[2]
+            indices = [int(p) for p in parts[3:]]
             rows = fetch_rows(chat_id, status_key)
-            platform, prows = resolve_platform(rows, pidx)
+            breadcrumb, current_rows = resolve_nav(rows, mode, indices)
             await query.answer()
-            await query.edit_message_text(
-                f"📺 <b>{html.escape(platform)}</b>\n\nEscolha a categoria:",
-                parse_mode="HTML",
-                reply_markup=kb_categories(status_key, pidx, prows),
-            )
-            return
 
-        if action == "lg":
-            status_key, pidx, cidx = parts[1], int(parts[2]), int(parts[3])
-            rows = fetch_rows(chat_id, status_key)
-            platform, prows = resolve_platform(rows, pidx)
-            category, crows = resolve_category(prows, cidx)
-            await query.answer()
-            await query.edit_message_text(
-                f"📺 {html.escape(platform)} · {MEDIA_TYPE_ICON.get(category, '')} "
-                f"<b>{html.escape(category)}</b>\n\nEscolha o genero:",
-                parse_mode="HTML",
-                reply_markup=kb_genres(status_key, pidx, cidx, crows),
-            )
-            return
+            header = f"{MODE_LABEL[mode]}"
+            if breadcrumb:
+                header = breadcrumb_text(breadcrumb)
 
-        if action == "li":
-            status_key, pidx, cidx, gidx = parts[1], int(parts[2]), int(parts[3]), int(parts[4])
-            rows = fetch_rows(chat_id, status_key)
-            platform, prows = resolve_platform(rows, pidx)
-            category, crows = resolve_category(prows, cidx)
-            genre, grows = resolve_genre(crows, gidx)
-            await query.answer()
-            await query.edit_message_text(
-                f"📺 {html.escape(platform)} · {html.escape(category)} · "
-                f"🏷 <b>{html.escape(genre)}</b>\n\nToque num titulo:",
-                parse_mode="HTML",
-                reply_markup=kb_items(status_key, pidx, cidx, gidx, grows),
-            )
+            if len(indices) < 3:
+                next_dim = DIM_ORDER[mode][len(indices)]
+                await query.edit_message_text(
+                    f"{header}\n\nEscolha {DIM_LABEL[next_dim]}:",
+                    parse_mode="HTML",
+                    reply_markup=kb_dim_options(status_key, mode, indices, current_rows),
+                )
+            else:
+                await query.edit_message_text(
+                    f"{header}\n\nToque num titulo:",
+                    parse_mode="HTML",
+                    reply_markup=kb_items(status_key, mode, indices, current_rows),
+                )
             return
 
         if action == "v":
             item_id = int(parts[1])
-            status_key, pidx, cidx, gidx = parts[2], int(parts[3]), int(parts[4]), int(parts[5])
+            status_key, mode = parts[2], parts[3]
+            indices = [int(p) for p in parts[4:]]
             conn = get_conn()
             row = conn.execute(
                 "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
@@ -620,13 +621,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not row:
                 await query.edit_message_text("Nao achei esse item (pode ter sido removido).")
                 return
-            text, keyboard = build_detail_view(row, (status_key, pidx, cidx, gidx))
+            text, keyboard = build_detail_view(row, (status_key, mode, indices))
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
         if action in ("m", "u", "x"):
             item_id = int(parts[1])
-            status_key, pidx, cidx, gidx = parts[2], int(parts[3]), int(parts[4]), int(parts[5])
+            status_key, mode = parts[2], parts[3]
+            indices = [int(p) for p in parts[4:]]
 
             conn = get_conn()
             if action == "m":
@@ -657,7 +659,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
             ).fetchone()
             conn.close()
-            text, keyboard = build_detail_view(row, (status_key, pidx, cidx, gidx))
+            text, keyboard = build_detail_view(row, (status_key, mode, indices))
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
@@ -669,22 +671,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
-def resolve_path_for_row(chat_id: int, row: sqlite3.Row) -> tuple:
+def resolve_path_for_row(chat_id: int, row: sqlite3.Row, mode: str = "f") -> tuple:
     status_key = KEY_BY_STATUS.get(row["status"], "p")
     rows = fetch_rows(chat_id, status_key)
-    platform = platform_of(row)
-    category = category_of(row)
-    platforms = unique_sorted(platform_of(r) for r in rows)
-    pidx = platforms.index(platform) if platform in platforms else 0
-    prows = rows_in_platform(rows, platform)
-    categories = unique_sorted(category_of(r) for r in prows)
-    cidx = categories.index(category) if category in categories else 0
-    crows = rows_in_category(prows, category)
-    row_genres = genres_of(row)
-    genres = sorted(set().union(*[genres_of(r) for r in crows]), key=lambda s: s.lower())
-    genre = row_genres[0] if row_genres else UNKNOWN_GENRE
-    gidx = genres.index(genre) if genre in genres else 0
-    return status_key, pidx, cidx, gidx
+    dims = DIM_ORDER[mode]
+    row_value_of = {"plat": platform_of(row), "cat": category_of(row), "genre": (genres_of(row) or [UNKNOWN_GENRE])[0]}
+
+    indices = []
+    current = rows
+    for dim in dims:
+        values = dim_values(dim, current)
+        target = row_value_of[dim]
+        idx = values.index(target) if target in values else 0
+        indices.append(idx)
+        value = values[idx] if values else target
+        current = dim_filter(dim, value, current)
+    return status_key, mode, indices
 
 
 async def detalhes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
