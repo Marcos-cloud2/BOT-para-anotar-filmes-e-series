@@ -18,8 +18,13 @@ zero, mesmo que você nunca tenha feito nada parecido antes.
   identificar o título oficial, o tipo (Filme, Série ou Anime), o(s)
   gênero(s), a nota do público/crítica, uma sinopse curta e em quais
   plataformas de streaming está disponível no Brasil.
-- Tudo isso fica salvo numa lista, organizada por **plataforma → categoria →
-  gênero → título**, navegável por botões direto no chat do Telegram.
+- Tudo isso fica salvo numa lista navegável por botões direto no chat do
+  Telegram: você escolhe se quer navegar **por plataforma** ou **por
+  gênero**, e o bot vai afunilando as opções (categoria, depois a outra
+  dimensão) até chegar no título — só aparece o que você realmente tem
+  cadastrado.
+- Se você tentar adicionar um título que já está na lista (assistido ou
+  não), o bot avisa em vez de cadastrar duplicado.
 - Dá pra marcar como assistido, desmarcar, corrigir o nome ou remover, tudo
   pelos botões ou por comando.
 
@@ -30,8 +35,9 @@ Você vai precisar de três coisas, todas gratuitas:
 1. Uma conta no Telegram (pra criar o bot)
 2. Uma conta Google (pra gerar a chave de acesso à IA Gemini)
 3. Python instalado na sua máquina (versão 3.10 ou mais nova), ou uma conta
-   no [Render](https://render.com) se quiser deixar o bot rodando na nuvem
-   24 horas por dia sem depender do seu computador ligado
+   no [Fly.io](https://fly.io) se quiser deixar o bot rodando na nuvem
+   24 horas por dia sem depender do seu computador ligado (passo 6 deste
+   guia)
 
 ## Passo 1 — Criar o bot no Telegram
 
@@ -223,14 +229,22 @@ Fly.io, Supabase, etc.).
   sozinho.
 - Ou simplesmente digita o nome do título direto no chat.
 
-Em ambos os casos, o bot responde já com tipo, gênero, nota, sinopse e onde
-assistir.
+Em ambos os casos, o bot responde já com tipo, gênero, nota (avaliação de
+público/crítica), sinopse e onde assistir.
+
+Se o título já estiver na sua lista (assistido ou não), o bot não cadastra
+de novo — ele avisa que já existe, mostra o status atual e te dá botões
+pra abrir os detalhes daquele item.
 
 **Navegar pela lista:**
-- `/lista` mostra o que falta assistir, organizado por plataforma de
-  streaming. Você toca na plataforma, depois na categoria (Filme, Série ou
-  Anime), depois no gênero, até chegar no título — só aparecem as opções
-  que você realmente tem cadastradas.
+- `/lista` pergunta primeiro: navegar **por plataforma** ou **por gênero**?
+  - Por plataforma: você toca na plataforma de streaming, depois na
+    categoria (Filme, Série ou Anime), depois no gênero, até chegar no
+    título.
+  - Por gênero: mesma ideia, só que começando pelo gênero, depois
+    categoria, depois plataforma.
+  - Em qualquer um dos dois caminhos, só aparecem as opções que você
+    realmente tem cadastradas — nada de categoria ou plataforma vazia.
 - `/assistidos` funciona do mesmo jeito, mas para o que você já assistiu.
 - Ao tocar num título, aparece a sinopse completa, a nota, onde assistir, e
   botões para marcar como assistido, desmarcar ou remover.
@@ -250,10 +264,12 @@ de confirmação quando você adiciona algo novo.
 
 ```
 telegram-filmes-bot/
-├── bot.py            # todo o codigo do bot
-├── requirements.txt  # dependencias Python
-├── Dockerfile         # usado pelo Render para montar o ambiente
-├── .env.example       # exemplo de variaveis de ambiente (sem valores reais)
-├── .gitignore         # garante que segredos e o banco de dados nao vao pro Git
-└── README.md          # este arquivo
+├── bot.py                          # todo o codigo do bot
+├── requirements.txt                # dependencias Python
+├── Dockerfile                      # usado pelo Fly.io para montar o ambiente
+├── fly.toml                        # configuracao do app no Fly.io
+├── .github/workflows/fly-deploy.yml  # deploy automatico opcional (ver Passo 6)
+├── .env.example                    # exemplo de variaveis de ambiente (sem valores reais)
+├── .gitignore                      # garante que segredos e o banco de dados nao vao pro Git
+└── README.md                       # este arquivo
 ```
