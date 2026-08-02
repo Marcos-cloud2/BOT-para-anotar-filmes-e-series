@@ -119,38 +119,102 @@ respondendo. Se fechar o terminal, o bot para.
 
 Rodar localmente é ótimo pra testar, mas o bot só responde enquanto o seu
 computador estiver ligado e o script rodando. Pra deixar ele sempre ativo,
-sem depender disso, você pode hospedar de graça no [Render](https://render.com):
+sem depender disso, o jeito que usei foi o [Fly.io](https://fly.io) — ele
+tem uma cota de uso gratuita que cobre tranquilamente um bot pessoal como
+esse rodando o tempo todo (o Render, que era outra opção gratuita comum,
+tirou o plano free de "Background Worker" e hoje cobra a partir de
+$7/mês).
 
-1. Suba este projeto para um repositório seu no GitHub (as variáveis
-   sigilosas ficam automaticamente de fora do repositório graças ao arquivo
-   `.gitignore` incluso).
-2. Crie uma conta em https://render.com e conecte com o GitHub.
-3. Clique em **New > Background Worker**.
-4. Selecione o repositório do bot. O Render vai detectar o `Dockerfile`
-   incluso no projeto automaticamente e usar ele para montar o ambiente.
-5. Na seção **Environment > Environment Variables**, adicione:
-   - `TELEGRAM_BOT_TOKEN` com o token do BotFather
-   - `GEMINI_API_KEY` com a chave do Google AI Studio
-6. Clique em **Deploy**. Acompanhe os logs até ver a mensagem "Bot iniciado,
-   aguardando mensagens...".
+**Antes de começar:** o Fly.io pede um cartão de crédito cadastrado como
+verificação de conta antes de liberar qualquer deploy, mesmo pra quem vai
+ficar só na cota gratuita. Ele não cobra automaticamente enquanto o uso
+ficar dentro da cota — mas é bom saber disso antes de criar a conta.
+
+1. Instale o `flyctl` (a ferramenta de linha de comando do Fly.io):
+   - Windows (PowerShell): `iwr https://fly.io/install.ps1 -useb | iex`
+   - Linux/macOS: `curl -L https://fly.io/install.sh | sh`
+2. Feche e abra o terminal de novo (ou adicione o `flyctl` ao PATH
+   manualmente), depois confirme que instalou: `flyctl version`
+3. Faça login (abre o navegador pra você criar conta ou entrar):
+   ```bash
+   flyctl auth login
+   ```
+4. Dentro da pasta do projeto (`telegram-filmes-bot`), crie o app sem fazer
+   deploy ainda (troque `seu-nome-aqui` por um nome único global, tipo
+   `filmes-bot-seunome`):
+   ```bash
+   flyctl launch --name filmes-bot-seunome --region gru --no-deploy --yes
+   ```
+   Isso gera um arquivo `fly.toml` na pasta do projeto.
+5. **Importante:** o `flyctl launch` assume por padrão que o app serve
+   páginas web e adiciona um bloco `[http_service]` no `fly.toml` que
+   desliga a máquina quando não há tráfego HTTP — isso mataria o bot, que
+   não serve HTTP nenhum, só fica conversando com o Telegram. Abra o
+   `fly.toml` gerado e apague o bloco `[http_service]` inteiro. O arquivo
+   deve ficar parecido com este (que já vem pronto no repositório):
+   ```toml
+   app = 'filmes-bot-seunome'
+   primary_region = 'gru'
+
+   [build]
+
+   [[vm]]
+     memory = '256mb'
+     cpu_kind = 'shared'
+     cpus = 1
+     memory_mb = 256
+   ```
+6. Cadastre os segredos (nunca ficam no código nem no `fly.toml`):
+   ```bash
+   flyctl secrets set TELEGRAM_BOT_TOKEN="seu_token_do_botfather" GEMINI_API_KEY="sua_chave_do_google_ai_studio"
+   ```
+7. Faça o deploy:
+   ```bash
+   flyctl deploy
+   ```
+8. Confira se subiu certo:
+   ```bash
+   flyctl status
+   flyctl logs
+   ```
+   Nos logs deve aparecer "Bot iniciado, aguardando mensagens...".
+
+**Atenção a um detalhe do `flyctl launch`:** por padrão ele cria duas
+máquinas (uma principal e uma "standby" de redundância, que só liga
+sozinha se o hardware do Fly falhar). Isso normalmente não é problema —
+mas se você rodar `flyctl scale count 1` pra reduzir a apenas uma máquina,
+ele pode derrubar a que estava ativa e deixar só a standby (que fica
+desligada). Se isso acontecer, é só ligar ela de novo:
+```bash
+flyctl status
+flyctl machine start <ID_DA_MAQUINA_QUE_APARECE_COMO_STOPPED>
+```
 
 A partir daí, o bot roda sozinho na nuvem, 24 horas por dia, mesmo com seu
 computador desligado.
 
+**Deploy automático (opcional):** o `flyctl launch` já deixa pronto um
+workflow em `.github/workflows/fly-deploy.yml` que faz deploy sozinho toda
+vez que você der `git push` na branch `main`. Ele só funciona se você
+cadastrar um token nos segredos do repositório do GitHub (Settings >
+Secrets and variables > Actions > New repository secret, nome
+`FLY_API_TOKEN`, valor gerado com `flyctl tokens create deploy`). Se não
+configurar isso, tudo bem — o workflow so vai falhar silenciosamente na
+aba Actions, sem afetar o bot, e você continua fazendo deploy manual com
+`flyctl deploy` quando quiser.
+
 ### Sobre a lista salva (importante saber)
 
 O bot guarda a lista de filmes/séries num arquivo local `filmes.db`
-(um banco SQLite simples). No plano gratuito do Render, o disco do container
-é apagado a cada novo deploy — ou seja, se você atualizar o código e fizer
-um novo deploy, a lista salva até ali pode ser perdida.
+(um banco SQLite simples) dentro da própria máquina do Fly.io. Isso quer
+dizer que a lista persiste entre reinicializações normais do bot, mas se a
+máquina for destruída e recriada do zero (por exemplo, se você mudar de
+região ou recriar o app), o banco se perde junto.
 
-Para uso pessoal isso raramente é um problema (você não fica fazendo deploy
-toda hora), mas se quiser manter a lista permanente para sempre, existem
-duas opções:
-- Adicionar um **Persistent Disk** no Render (recurso pago) apontando para
-  a pasta `/app`.
-- Trocar o SQLite por um banco de dados externo gratuito (Postgres do
-  próprio Render, ou Supabase, por exemplo).
+Para uso pessoal isso raramente é um problema, mas se quiser manter a
+lista permanente e resistente mesmo a esses casos, dá pra trocar o SQLite
+por um banco de dados externo gratuito (Postgres free tier do próprio
+Fly.io, Supabase, etc.).
 
 ## Como usar o bot no dia a dia
 
