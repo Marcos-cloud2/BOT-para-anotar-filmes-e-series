@@ -248,7 +248,42 @@ def format_new_item_message(item_id: int, title: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def normalize_title(title: str) -> str:
+    return re.sub(r"[^\w]+", "", title.strip().lower())
+
+
+def find_duplicate(chat_id: int, title: str):
+    normalized = normalize_title(title)
+    if not normalized:
+        return None
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM items WHERE chat_id = ?", (chat_id,)
+    ).fetchall()
+    conn.close()
+    for row in rows:
+        if normalize_title(row["title"]) == normalized:
+            return row
+    return None
+
+
+async def warn_duplicate(update: Update, chat_id: int, row: sqlite3.Row) -> None:
+    status_label = "assistido ✅" if row["status"] == "assistido" else "na sua lista pra assistir 🍿"
+    text = (
+        f"⚠️ <b>{html.escape(row['title'])}</b> ja esta {status_label} (#{row['id']}). "
+        f"Nao adicionei de novo pra evitar duplicar."
+    )
+    path = resolve_path_for_row(chat_id, row)
+    _, keyboard = build_detail_view(row, path)
+    await update.message.reply_html(text, reply_markup=keyboard)
+
+
 async def save_item(update: Update, chat_id: int, title: str, data: dict) -> None:
+    duplicate = find_duplicate(chat_id, title)
+    if duplicate:
+        await warn_duplicate(update, chat_id, duplicate)
+        return
+
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO items "
@@ -634,6 +669,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+def resolve_path_for_row(chat_id: int, row: sqlite3.Row) -> tuple:
+    status_key = KEY_BY_STATUS.get(row["status"], "p")
+    rows = fetch_rows(chat_id, status_key)
+    platform = platform_of(row)
+    category = category_of(row)
+    platforms = unique_sorted(platform_of(r) for r in rows)
+    pidx = platforms.index(platform) if platform in platforms else 0
+    prows = rows_in_platform(rows, platform)
+    categories = unique_sorted(category_of(r) for r in prows)
+    cidx = categories.index(category) if category in categories else 0
+    crows = rows_in_category(prows, category)
+    row_genres = genres_of(row)
+    genres = sorted(set().union(*[genres_of(r) for r in crows]), key=lambda s: s.lower())
+    genre = row_genres[0] if row_genres else UNKNOWN_GENRE
+    gidx = genres.index(genre) if genre in genres else 0
+    return status_key, pidx, cidx, gidx
+
+
 async def detalhes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
@@ -655,22 +708,8 @@ async def detalhes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Nao achei esse ID na sua lista.")
         return
 
-    status_key = KEY_BY_STATUS.get(row["status"], "p")
-    rows = fetch_rows(chat_id, status_key)
-    platform = platform_of(row)
-    category = category_of(row)
-    platforms = unique_sorted(platform_of(r) for r in rows)
-    pidx = platforms.index(platform) if platform in platforms else 0
-    prows = rows_in_platform(rows, platform)
-    categories = unique_sorted(category_of(r) for r in prows)
-    cidx = categories.index(category) if category in categories else 0
-    crows = rows_in_category(prows, category)
-    row_genres = genres_of(row)
-    genres = sorted(set().union(*[genres_of(r) for r in crows]), key=lambda s: s.lower())
-    genre = row_genres[0] if row_genres else UNKNOWN_GENRE
-    gidx = genres.index(genre) if genre in genres else 0
-
-    text, keyboard = build_detail_view(row, (status_key, pidx, cidx, gidx))
+    path = resolve_path_for_row(chat_id, row)
+    text, keyboard = build_detail_view(row, path)
     await update.message.reply_html(text, reply_markup=keyboard)
 
 
