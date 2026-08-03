@@ -3,7 +3,8 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 from io import BytesIO
 
 from google import genai
@@ -204,9 +205,43 @@ def watched_titles(chat_id: int) -> list:
     return [r["title"] for r in rows]
 
 
-async def build_recommendation(chat_id: int, query_text: str) -> dict:
+_MIN_RATING_PATTERN = re.compile(
+    r"(?:nota|avalia[cç][aã]o)?\s*"
+    r"(?:>=|≥|>|acima de|maior (?:ou igual )?que|pelo menos|no m[íi]nimo|m[íi]nim[oa](?: de)?)"
+    r"\s*(\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def extract_min_rating(text: str) -> float | None:
+    match = _MIN_RATING_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_rating_value(rating_str: str) -> float | None:
+    match = re.match(r"(\d+(?:[.,]\d+)?)", (rating_str or "").strip())
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+async def build_recommendation(chat_id: int, query_text: str, min_rating: float | None = None) -> dict:
     excluded = watched_titles(chat_id)
     excluded_text = ", ".join(excluded) if excluded else "nenhum ainda"
+    rating_constraint = (
+        f"A nota do titulo deve ser {min_rating} ou mais (numa escala de 0 a 10). "
+        "Se nao achar nada que atenda a esse criterio, responda TITULO: DESCONHECIDO.\n"
+        if min_rating is not None
+        else ""
+    )
     prompt = (
         f"O usuario pediu uma recomendacao de filme, serie ou anime assim: "
         f"\"{query_text}\".\n"
@@ -216,6 +251,7 @@ async def build_recommendation(chat_id: int, query_text: str) -> dict:
         "Escolha APENAS UM titulo que atenda ao pedido, esteja atualmente "
         "popular ou bem avaliado, e esteja disponivel numa das plataformas "
         "mencionadas pelo usuario (se ele mencionou alguma).\n"
+        f"{rating_constraint}"
         f"NAO recomende nenhum destes titulos, que o usuario ja assistiu: "
         f"{excluded_text}\n\n"
         f"{RESPONSE_FORMAT}\n\n"
@@ -266,9 +302,11 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
         )
         return
 
+    min_rating = extract_min_rating(query_text)
+
     await update.message.chat.send_action("typing")
     try:
-        data = await build_recommendation(chat_id, query_text)
+        data = await build_recommendation(chat_id, query_text, min_rating)
     except Exception:
         logger.exception("Erro ao buscar recomendacao")
         await update.message.reply_text(
@@ -277,11 +315,16 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
         return
 
     title = data.get("title", "").strip()
+    got_rating = parse_rating_value(data.get("rating", ""))
+    if min_rating is not None and got_rating is not None and got_rating < min_rating:
+        title = ""  # a IA nao respeitou o filtro, trata como "nao encontrado"
+
     if not title or title.upper() == "DESCONHECIDO":
-        await update.message.reply_text(
-            "Nao encontrei uma recomendacao boa pra esse pedido. Tenta descrever "
-            "de outro jeito (genero, plataforma)?"
-        )
+        msg = "Nao encontrei uma recomendacao boa pra esse pedido."
+        if min_rating is not None:
+            msg += f" Nada com nota {min_rating}+ apareceu pra esse genero/plataforma."
+        msg += " Tenta descrever de outro jeito (genero, plataforma)?"
+        await update.message.reply_text(msg)
         return
 
     token = cache_recommendation(chat_id, title, data)
@@ -678,20 +721,43 @@ def kb_dim_options(status_key: str, mode: str, indices: list, rows: list) -> Inl
     return InlineKeyboardMarkup(buttons)
 
 
+TODOS_PAGE_SIZE = 10
+
+
 def kb_items(status_key: str, mode: str, indices: list, rows: list) -> InlineKeyboardMarkup:
-    label_fn = all_items_button_label if mode == "t" else item_button_label
+    if mode == "t":
+        page = indices[0] if indices else 0
+        start = page * TODOS_PAGE_SIZE
+        page_rows = rows[start : start + TODOS_PAGE_SIZE]
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    all_items_button_label(r),
+                    callback_data=f"v|{r['id']}|{status_key}|{mode}|{page}",
+                )
+            ]
+            for r in page_rows
+        ]
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"todos|{page - 1}"))
+        if start + TODOS_PAGE_SIZE < len(rows):
+            nav_row.append(InlineKeyboardButton("Proxima ➡️", callback_data=f"todos|{page + 1}"))
+        if nav_row:
+            buttons.append(nav_row)
+        return InlineKeyboardMarkup(buttons)
+
     buttons = [
         [
             InlineKeyboardButton(
-                label_fn(r),
+                item_button_label(r),
                 callback_data="|".join(["v", str(r["id"]), status_key, mode] + [str(i) for i in indices]),
             )
         ]
         for r in rows
     ]
-    if mode != "t":
-        back_cb = nav_callback(status_key, mode, indices[:-1])
-        buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
+    back_cb = nav_callback(status_key, mode, indices[:-1])
+    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -728,7 +794,10 @@ def build_detail_view(row: sqlite3.Row, path: tuple):
     text = item_detail_text(row)
 
     suffix = "|".join([str(row["id"]), status_key, mode] + [str(i) for i in indices])
-    back_cb = "todos" if mode == "t" else nav_callback(status_key, mode, indices)
+    if mode == "t":
+        back_cb = f"todos|{indices[0]}" if indices else "todos"
+    else:
+        back_cb = nav_callback(status_key, mode, indices)
     back_button = InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)
 
     if row["status"] == "assistido":
@@ -801,16 +870,25 @@ async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_list(update, update.effective_chat.id, "r")
 
 
+def todos_header(rows: list, page: int) -> tuple:
+    total_pages = max(1, (len(rows) + TODOS_PAGE_SIZE - 1) // TODOS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    header = MODE_LABEL["t"]
+    if total_pages > 1:
+        header += f" (pagina {page + 1}/{total_pages})"
+    return header, page
+
+
 async def todos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     rows = fetch_rows(chat_id, "t")
-    header = MODE_LABEL["t"]
     if not rows:
-        await update.message.reply_html(f"{header}\n\n<i>Vazio por aqui.</i>")
+        await update.message.reply_html(f"{MODE_LABEL['t']}\n\n<i>Vazio por aqui.</i>")
         return
+    header, page = todos_header(rows, 0)
     await update.message.reply_html(
         f"{header}\n\nToque num titulo:",
-        reply_markup=kb_items("t", "t", [], rows),
+        reply_markup=kb_items("t", "t", [page], rows),
     )
 
 
@@ -848,15 +926,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         if action == "todos":
+            page = int(parts[1]) if len(parts) > 1 else 0
             rows = fetch_rows(chat_id, "t")
-            header = MODE_LABEL["t"]
             await query.answer()
             if not rows:
-                await query.edit_message_text(f"{header}\n\nVazio por aqui.")
+                await query.edit_message_text(f"{MODE_LABEL['t']}\n\nVazio por aqui.")
                 return
+            header, page = todos_header(rows, page)
             await query.edit_message_text(
                 f"{header}\n\nToque num titulo:",
-                reply_markup=kb_items("t", "t", [], rows),
+                reply_markup=kb_items("t", "t", [page], rows),
             )
             return
 
@@ -990,6 +1069,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def resolve_path_for_row(chat_id: int, row: sqlite3.Row, mode: str = "f") -> tuple:
     status_key = KEY_BY_STATUS.get(row["status"], "p")
+    if mode == "t":
+        return status_key, "t", [0]
     rows = fetch_rows(chat_id, status_key)
     dims = DIM_ORDER[mode]
     row_value_of = {"plat": platform_of(row), "cat": category_of(row), "genre": (genres_of(row) or [UNKNOWN_GENRE])[0]}
@@ -1121,6 +1202,34 @@ async def remover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Nao achei esse ID na sua lista.")
 
 
+REMINDER_STALE_DAYS = 30
+REMINDER_HOUR_UTC = 21  # ~18h no horario de Brasilia (UTC-3)
+
+
+async def send_stale_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    cutoff = (datetime.utcnow() - timedelta(days=REMINDER_STALE_DAYS)).isoformat()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT chat_id, COUNT(*) as cnt FROM items "
+        "WHERE status = 'para assistir' AND created_at < ? "
+        "GROUP BY chat_id",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+
+    for row in rows:
+        chat_id, count = row["chat_id"], row["cnt"]
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"📌 Voce tem {count} titulo(s) parado(s) ha mais de "
+                f"{REMINDER_STALE_DAYS} dias na lista. Bora assistir algum? "
+                f"Da uma olhada no /todos",
+            )
+        except Exception:
+            logger.exception("Erro ao enviar lembrete pro chat %s", chat_id)
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("Defina a variavel de ambiente TELEGRAM_BOT_TOKEN")
@@ -1146,6 +1255,15 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    if app.job_queue:
+        app.job_queue.run_daily(
+            send_stale_reminders, time=dt_time(hour=REMINDER_HOUR_UTC, minute=0)
+        )
+    else:
+        logger.warning(
+            "JobQueue indisponivel (falta a extra [job-queue]) — lembrete diario desativado."
+        )
 
     logger.info("Bot iniciado, aguardando mensagens...")
     app.run_polling()

@@ -237,6 +237,36 @@ foi exatamente isso: o banco antigo ficou preso numa máquina que já não
 existe mais. Crie o volume com o comando acima, rode `flyctl deploy` de
 novo, e a partir daí a lista passa a sobreviver a qualquer deploy futuro.
 
+### Backup automático e como restaurar
+
+Todo volume do Fly.io tem **snapshot diário automático**, com retenção de
+5 gerações — isso já vem ativado por padrão, não precisa configurar nada
+extra. Pra confirmar que está ativo no seu app:
+
+```bash
+flyctl volumes list -a <nome-do-seu-app>
+```
+
+Procure por `Scheduled snapshots: true` na saída. Pra ver os snapshots já
+existentes (o primeiro só aparece ~24h depois de criar o volume):
+
+```bash
+flyctl volumes snapshots list <volume-id> -a <nome-do-seu-app>
+```
+
+**Se precisar restaurar um snapshot** (por exemplo, se apagou algo sem
+querer ou os dados corromperam), o processo cria um **volume novo** a
+partir do snapshot escolhido — não sobrescreve o volume atual:
+
+```bash
+flyctl volumes create filmes_data_restaurado --snapshot-id <snapshot-id> --region gru -a <nome-do-seu-app>
+```
+
+Depois disso, edite o `fly.toml` trocando `source = 'filmes_data'` para o
+nome do volume restaurado, rode `flyctl deploy`, confirme que os dados
+voltaram, e só então pode apagar o volume antigo com `flyctl volumes
+destroy`.
+
 ## Como usar o bot no dia a dia
 
 **Adicionar um item:**
@@ -253,9 +283,11 @@ pra abrir os detalhes daquele item.
 
 **Navegar pela lista:**
 - `/todos` mostra tudo numa lista só, sem etapas — cada botão já vem com o
-  gênero e um marcador de status (🍿 pra assistir, ✅ assistido) na frente
-  do título. Toca no título e abre a sinopse completa, com os mesmos
-  botões de marcar/remover das outras telas.
+  número (`#id`), gênero e um marcador de status (🍿 pra assistir, ✅
+  assistido) na frente do título. Toca no título e abre a sinopse
+  completa, com os mesmos botões de marcar/remover das outras telas. Com
+  mais de 10 itens, aparecem botões "Anterior"/"Próxima" pra navegar entre
+  páginas.
 - `/lista` pergunta primeiro: navegar **por plataforma** ou **por gênero**?
   - Por plataforma: você toca na plataforma de streaming, depois na
     categoria (Filme, Série ou Anime), depois no gênero, até chegar no
@@ -314,6 +346,30 @@ Duas formas de pedir:
   "indica" ou "sugere" — funciona em conversa privada, ou em grupo
   respondendo a uma mensagem do bot (mesma regra do texto livre explicada
   na seção de grupos, abaixo)
+
+**Filtro por nota mínima:** se você mencionar uma nota no pedido, o bot só
+recomenda algo que atenda esse critério. Funciona com frases como:
+- `/recomendar filme de acao com nota acima de 7`
+- `serie de comedia nota >= 8.5`
+- `anime bom, pelo menos 7,5`
+
+Se nada disponível bater com o gênero/plataforma pedidos **e** a nota
+mínima ao mesmo tempo, o bot avisa que não achou em vez de forçar uma
+sugestão ruim.
+
+## Lembrete de itens parados
+
+Todo dia, o bot verifica quem tem títulos na lista "para assistir" há mais
+de 30 dias e manda uma mensagem tipo *"Você tem 3 título(s) parado(s) há
+mais de 30 dias. Bora assistir algum?"*. O horário fixo é **21h UTC**
+(~18h no horário de Brasília), configurado em `REMINDER_HOUR_UTC` no topo
+da função `main()` em `bot.py` — mude esse valor se quiser outro horário.
+
+Esse recurso depende do `JobQueue` do `python-telegram-bot`, que por sua
+vez precisa do pacote `APScheduler`. Por isso o `requirements.txt` usa
+`python-telegram-bot[job-queue]` em vez de só `python-telegram-bot`. Se
+você instalar as dependências erradas essa parte fica desativada — mas o
+resto do bot continua funcionando normal, só sem o lembrete diário.
 
 ## Usando o bot em um grupo
 
