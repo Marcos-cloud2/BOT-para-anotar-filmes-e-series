@@ -334,8 +334,26 @@ pra abrir os detalhes daquele item.
   em linguagem natural ("me indica um anime bom", "sugere um filme de
   terror") em vez de usar o comando.
 
-O número (`<id>`) de cada item aparece nas telas de detalhes e nas mensagens
-de confirmação quando você adiciona algo novo.
+O número (`<numero>`) de cada item aparece nas telas de detalhes e nas
+mensagens de confirmação quando você adiciona algo novo.
+
+### Sobre a numeração dos itens
+
+O número que aparece na frente de cada título (`#1`, `#2`...) **não é um
+código fixo** — é sempre a posição daquele item entre os títulos ativos da
+sua lista, calculada na hora. Isso significa que:
+
+- Depois de `/limpartudo` (ou de remover tudo um por um), o próximo item
+  cadastrado volta a ser `#1` automaticamente.
+- Se você remove um item do meio da lista, os que vêm depois "sobem" um
+  número, preenchendo o buraco sozinhos — nunca fica um `#7` faltando
+  entre `#6` e `#8`.
+- Itens no `/historico` (já removidos) não entram nessa contagem; eles
+  ficam de fora até serem restaurados.
+
+Por trás dos panos, cada item também tem um identificador interno fixo
+que nunca muda (usado pelos botões) — mas isso é invisível pra você, só o
+número exibido importa pro dia a dia.
 
 ## Pedindo recomendação
 

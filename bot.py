@@ -106,13 +106,13 @@ HELP_TEXT = (
     "/historico - ver itens removidos e restaurar se quiser\n"
     "/stats - estatisticas da sua lista (total, genero mais comum, "
     "assistidos no mes)\n"
-    "/detalhes &lt;id&gt; - ver todos os detalhes de um item pelo numero\n"
-    "/marcar &lt;id&gt; - marcar como assistido\n"
-    "/desmarcar &lt;id&gt; - voltar pra lista de assistir\n"
-    "/renomear &lt;id&gt; &lt;nome certo&gt; - corrigir o titulo\n"
-    "/genero &lt;id&gt; &lt;novo genero&gt; - corrigir o genero\n"
-    "/plataforma &lt;id&gt; &lt;nova plataforma&gt; - corrigir onde assistir\n"
-    "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n"
+    "/detalhes &lt;numero&gt; - ver todos os detalhes de um item\n"
+    "/marcar &lt;numero&gt; - marcar como assistido\n"
+    "/desmarcar &lt;numero&gt; - voltar pra lista de assistir\n"
+    "/renomear &lt;numero&gt; &lt;nome certo&gt; - corrigir o titulo\n"
+    "/genero &lt;numero&gt; &lt;novo genero&gt; - corrigir o genero\n"
+    "/plataforma &lt;numero&gt; &lt;nova plataforma&gt; - corrigir onde assistir\n"
+    "/remover &lt;numero&gt; - remover (vai pro /historico, nao apaga de vez)\n"
     "/limpartudo - remove todos os itens da lista de uma vez (pede "
     "confirmacao, vai pro /historico)\n"
     "/adicionar &lt;nome&gt; - adicionar um titulo por texto (funciona em "
@@ -127,6 +127,10 @@ HELP_TEXT = (
     "Tambem da pra marcar, desmarcar e remover direto pelos botoes que "
     "aparecem no /lista e no /assistidos — marcar como assistido e remover "
     "sempre pedem confirmacao antes de executar.\n\n"
+    "O numero de cada item (o que aparece como #N) e sempre a posicao dele "
+    "entre os titulos ativos da sua lista — nao e um codigo fixo. Ou seja, "
+    "se voce remove um item ou limpa a lista toda, os numeros se "
+    "reorganizam sozinhos, sem buracos.\n\n"
     "<b>Em grupos:</b> por padrao o Telegram so deixa o bot ver mensagens "
     "que sao comandos. Prints funcionam normalmente assim que voce "
     "desativar o Modo Privacidade no @BotFather. Ja texto solto (sem "
@@ -379,6 +383,55 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
     await update.message.reply_html(text, reply_markup=keyboard)
 
 
+# --- Numeracao exibida ao usuario -------------------------------------------
+#
+# O id real do banco (chave primaria) nunca muda e nunca e reaproveitado —
+# isso e o que garante que os botoes continuem funcionando mesmo depois de
+# marcar/remover itens. Mas isso faz o numero exibido ("#79") continuar
+# subindo pra sempre, mesmo depois de limpar a lista toda.
+#
+# Pra resolver isso, o numero que o usuario VE e digita (nos comandos e nas
+# mensagens) e calculado na hora, como a posicao do item entre os itens
+# ativos (nao removidos) daquele chat, ordenados pelo id real. Isso faz os
+# numeros sempre ficarem sem buracos: 1, 2, 3... e depois de zerar a lista,
+# o proximo item cadastrado volta a ser o #1 automaticamente.
+
+
+def active_order_map(chat_id: int) -> dict:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM items WHERE chat_id = ? AND status != 'removido' ORDER BY id ASC",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return {r["id"]: i + 1 for i, r in enumerate(rows)}
+
+
+def get_display_number(chat_id: int, real_id: int) -> int | None:
+    return active_order_map(chat_id).get(real_id)
+
+
+def resolve_display_number(chat_id: int, display_number: int) -> int | None:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM items WHERE chat_id = ? AND status != 'removido' ORDER BY id ASC",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    if display_number < 1 or display_number > len(rows):
+        return None
+    return rows[display_number - 1]["id"]
+
+
+def item_number(row: sqlite3.Row, order_map: dict | None = None) -> int:
+    if row["status"] == "removido":
+        return row["id"]
+    if order_map is not None:
+        return order_map.get(row["id"], row["id"])
+    num = get_display_number(row["chat_id"], row["id"])
+    return num if num is not None else row["id"]
+
+
 # --- Normalizacao de campos para agrupamento --------------------------------
 
 MEDIA_TYPE_ICON = {"Filme": "🎬", "Série": "📺", "Anime": "🈴"}
@@ -430,13 +483,13 @@ def item_button_label(row: sqlite3.Row) -> str:
     return label
 
 
-def all_items_button_label(row: sqlite3.Row) -> str:
+def all_items_button_label(row: sqlite3.Row, order_map: dict | None = None) -> str:
     # Telegram nao deixa colorir o texto do botao; usamos um circulo colorido
     # como aproximacao visual: verde = assistido, amarelo = pendente.
     status_icon = "🟢" if row["status"] == "assistido" else "🟡"
     genre_list = genres_of(row)
     genre = genre_list[0] if genre_list and genre_list[0] != UNKNOWN_GENRE else ""
-    label = f"#{row['id']} {status_icon} {row['title']}"
+    label = f"#{item_number(row, order_map)} {status_icon} {row['title']}"
     if genre:
         label += f" ({genre})"
     if len(label) > 60:
@@ -487,7 +540,7 @@ def find_duplicate(chat_id: int, title: str):
 async def warn_duplicate(update: Update, chat_id: int, row: sqlite3.Row) -> None:
     status_label = "assistido ✅" if row["status"] == "assistido" else "na sua lista pra assistir 🍿"
     text = (
-        f"⚠️ <b>{html.escape(row['title'])}</b> ja esta {status_label} (#{row['id']}). "
+        f"⚠️ <b>{html.escape(row['title'])}</b> ja esta {status_label} (#{item_number(row)}). "
         f"Nao adicionei de novo pra evitar duplicar."
     )
     path = resolve_path_for_row(chat_id, row)
@@ -526,7 +579,8 @@ async def save_item(update: Update, chat_id: int, title: str, data: dict) -> Non
         return
 
     item_id = insert_new_item(chat_id, title, data)
-    await update.message.reply_html(format_new_item_message(item_id, title, data))
+    number = get_display_number(chat_id, item_id) or item_id
+    await update.message.reply_html(format_new_item_message(number, title, data))
 
 
 async def save_item_from_image(update: Update, chat_id: int, buf: BytesIO) -> None:
@@ -775,10 +829,11 @@ def kb_items(status_key: str, mode: str, indices: list, rows: list) -> InlineKey
         page = indices[0] if indices else 0
         start = page * TODOS_PAGE_SIZE
         page_rows = rows[start : start + TODOS_PAGE_SIZE]
+        order_map = active_order_map(rows[0]["chat_id"]) if rows else {}
         buttons = [
             [
                 InlineKeyboardButton(
-                    all_items_button_label(r),
+                    all_items_button_label(r, order_map),
                     callback_data=f"v|{r['id']}|{status_key}|{mode}|{page}",
                 )
             ]
@@ -820,7 +875,7 @@ STATUS_LABEL = {
 
 def item_detail_text(row: sqlite3.Row) -> str:
     date_str = row["created_at"][:10] if row["created_at"] else "?"
-    lines = [f"🎬 <b>{html.escape(row['title'])}</b> (#{row['id']})"]
+    lines = [f"🎬 <b>{html.escape(row['title'])}</b> (#{item_number(row)})"]
     tags = [t for t in [category_of(row), row["genre"]] if t]
     if tags:
         lines.append("🏷 " + html.escape(" · ".join(tags)))
@@ -1041,13 +1096,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "assistido ✅" if duplicate["status"] == "assistido" else "na sua lista pra assistir 🍿"
                 )
                 await query.edit_message_text(
-                    f"⚠️ <b>{html.escape(title)}</b> ja esta {status_label} (#{duplicate['id']}).",
+                    f"⚠️ <b>{html.escape(title)}</b> ja esta {status_label} "
+                    f"(#{item_number(duplicate)}).",
                     parse_mode="HTML",
                 )
                 return
             item_id = insert_new_item(r_chat_id, title, data)
+            number = get_display_number(r_chat_id, item_id) or item_id
             await query.edit_message_text(
-                format_new_item_message(item_id, title, data), parse_mode="HTML"
+                format_new_item_message(number, title, data), parse_mode="HTML"
             )
             return
 
@@ -1216,12 +1273,17 @@ def resolve_path_for_row(chat_id: int, row: sqlite3.Row, mode: str = "f") -> tup
 async def detalhes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Uso: /detalhes <id>")
+        await update.message.reply_text("Uso: /detalhes <numero>")
         return
     try:
-        item_id = int(context.args[0])
+        number = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID invalido.")
+        await update.message.reply_text("Numero invalido.")
+        return
+
+    item_id = resolve_display_number(chat_id, number)
+    if item_id is None:
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
         return
 
     conn = get_conn()
@@ -1231,7 +1293,7 @@ async def detalhes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn.close()
 
     if not row:
-        await update.message.reply_text("Nao achei esse ID na sua lista.")
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
         return
 
     path = resolve_path_for_row(chat_id, row)
@@ -1250,55 +1312,57 @@ async def desmarcar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def set_status(update, context, status, ok_msg):
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Uso: /marcar <id>")
+        await update.message.reply_text("Uso: /marcar <numero>")
         return
     try:
-        item_id = int(context.args[0])
+        number = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID invalido.")
+        await update.message.reply_text("Numero invalido.")
+        return
+
+    item_id = resolve_display_number(chat_id, number)
+    if item_id is None:
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
         return
 
     watched_at = datetime.utcnow().isoformat() if status == "assistido" else None
     conn = get_conn()
-    cur = conn.execute(
+    conn.execute(
         "UPDATE items SET status = ?, watched_at = ? WHERE id = ? AND chat_id = ?",
         (status, watched_at, item_id, chat_id),
     )
     conn.commit()
-    changed = cur.rowcount
     conn.close()
 
-    if changed:
-        await update.message.reply_text(f"{ok_msg}: #{item_id}")
-    else:
-        await update.message.reply_text("Nao achei esse ID na sua lista.")
+    await update.message.reply_text(f"{ok_msg}: #{number}")
 
 
 async def renomear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: /renomear <id> <novo nome>")
+        await update.message.reply_text("Uso: /renomear <numero> <novo nome>")
         return
     try:
-        item_id = int(context.args[0])
+        number = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID invalido.")
+        await update.message.reply_text("Numero invalido.")
         return
     new_title = " ".join(context.args[1:])
 
+    item_id = resolve_display_number(chat_id, number)
+    if item_id is None:
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
+        return
+
     conn = get_conn()
-    cur = conn.execute(
+    conn.execute(
         "UPDATE items SET title = ? WHERE id = ? AND chat_id = ?",
         (new_title, item_id, chat_id),
     )
     conn.commit()
-    changed = cur.rowcount
     conn.close()
 
-    if changed:
-        await update.message.reply_text(f"Renomeado #{item_id} para: {new_title}")
-    else:
-        await update.message.reply_text("Nao achei esse ID na sua lista.")
+    await update.message.reply_text(f"Renomeado #{number} para: {new_title}")
 
 
 async def set_field(update, context, column: str, label: str, usage: str) -> None:
@@ -1307,64 +1371,66 @@ async def set_field(update, context, column: str, label: str, usage: str) -> Non
         await update.message.reply_text(usage)
         return
     try:
-        item_id = int(context.args[0])
+        number = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID invalido.")
+        await update.message.reply_text("Numero invalido.")
         return
     new_value = " ".join(context.args[1:])
 
+    item_id = resolve_display_number(chat_id, number)
+    if item_id is None:
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
+        return
+
     conn = get_conn()
-    cur = conn.execute(
+    conn.execute(
         f"UPDATE items SET {column} = ? WHERE id = ? AND chat_id = ?",
         (new_value, item_id, chat_id),
     )
     conn.commit()
-    changed = cur.rowcount
     conn.close()
 
-    if changed:
-        await update.message.reply_text(f"{label} de #{item_id} atualizado(a) para: {new_value}")
-    else:
-        await update.message.reply_text("Nao achei esse ID na sua lista.")
+    await update.message.reply_text(f"{label} de #{number} atualizado(a) para: {new_value}")
 
 
 async def genero(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await set_field(update, context, "genre", "Genero", "Uso: /genero <id> <novo genero>")
+    await set_field(update, context, "genre", "Genero", "Uso: /genero <numero> <novo genero>")
 
 
 async def plataforma(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await set_field(
         update, context, "where_to_watch", "Plataforma",
-        "Uso: /plataforma <id> <nova(s) plataforma(s)>",
+        "Uso: /plataforma <numero> <nova(s) plataforma(s)>",
     )
 
 
 async def remover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Uso: /remover <id>")
+        await update.message.reply_text("Uso: /remover <numero>")
         return
     try:
-        item_id = int(context.args[0])
+        number = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID invalido.")
+        await update.message.reply_text("Numero invalido.")
+        return
+
+    item_id = resolve_display_number(chat_id, number)
+    if item_id is None:
+        await update.message.reply_text("Nao achei esse numero na sua lista.")
         return
 
     conn = get_conn()
-    cur = conn.execute(
+    conn.execute(
         "UPDATE items SET status = 'removido' WHERE id = ? AND chat_id = ? AND status != 'removido'",
         (item_id, chat_id),
     )
     conn.commit()
-    changed = cur.rowcount
     conn.close()
 
-    if changed:
-        await update.message.reply_text(
-            f"Removido #{item_id} 🗑 (fica guardado no /historico, da pra restaurar depois)"
-        )
-    else:
-        await update.message.reply_text("Nao achei esse ID na sua lista.")
+    await update.message.reply_text(
+        f"Removido #{number} 🗑 (fica guardado no /historico, da pra restaurar depois)"
+    )
 
 
 async def limpartudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
