@@ -85,7 +85,7 @@ def init_db():
         """
     )
     existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
-    for col in ("media_type", "genre", "rating", "synopsis", "where_to_watch"):
+    for col in ("media_type", "genre", "rating", "synopsis", "where_to_watch", "watched_at"):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE items ADD COLUMN {col} TEXT")
     conn.commit()
@@ -104,10 +104,14 @@ HELP_TEXT = (
     "/todos - lista simples com tudo (genero e status na frente de cada "
     "titulo), toque pra ver a sinopse\n"
     "/historico - ver itens removidos e restaurar se quiser\n"
+    "/stats - estatisticas da sua lista (total, genero mais comum, "
+    "assistidos no mes)\n"
     "/detalhes &lt;id&gt; - ver todos os detalhes de um item pelo numero\n"
     "/marcar &lt;id&gt; - marcar como assistido\n"
     "/desmarcar &lt;id&gt; - voltar pra lista de assistir\n"
     "/renomear &lt;id&gt; &lt;nome certo&gt; - corrigir o titulo\n"
+    "/genero &lt;id&gt; &lt;novo genero&gt; - corrigir o genero\n"
+    "/plataforma &lt;id&gt; &lt;nova plataforma&gt; - corrigir onde assistir\n"
     "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n"
     "/adicionar &lt;nome&gt; - adicionar um titulo por texto (funciona em "
     "grupos)\n"
@@ -233,35 +237,58 @@ def parse_rating_value(rating_str: str) -> float | None:
         return None
 
 
-async def build_recommendation(chat_id: int, query_text: str, min_rating: float | None = None) -> dict:
+RECOMMEND_COUNT = 3
+
+
+async def build_recommendations(
+    chat_id: int, query_text: str, min_rating: float | None = None
+) -> list:
     excluded = watched_titles(chat_id)
     excluded_text = ", ".join(excluded) if excluded else "nenhum ainda"
     rating_constraint = (
-        f"A nota do titulo deve ser {min_rating} ou mais (numa escala de 0 a 10). "
-        "Se nao achar nada que atenda a esse criterio, responda TITULO: DESCONHECIDO.\n"
+        f"A nota de cada titulo deve ser {min_rating} ou mais (numa escala de 0 a 10).\n"
         if min_rating is not None
         else ""
     )
     prompt = (
-        f"O usuario pediu uma recomendacao de filme, serie ou anime assim: "
+        f"O usuario pediu recomendacoes de filme, serie ou anime assim: "
         f"\"{query_text}\".\n"
         "Use a busca do Google pra saber o que esta em alta ou bem avaliado "
         "agora, de acordo com o pedido (genero, plataforma, etc, se "
         "mencionados).\n"
-        "Escolha APENAS UM titulo que atenda ao pedido, esteja atualmente "
-        "popular ou bem avaliado, e esteja disponivel numa das plataformas "
-        "mencionadas pelo usuario (se ele mencionou alguma).\n"
+        f"De ate {RECOMMEND_COUNT} opcoes DIFERENTES entre si que atendam ao "
+        "pedido, estejam atualmente populares ou bem avaliadas, e estejam "
+        "disponiveis numa das plataformas mencionadas pelo usuario (se ele "
+        "mencionou alguma).\n"
         f"{rating_constraint}"
-        f"NAO recomende nenhum destes titulos, que o usuario ja assistiu: "
+        f"NAO inclua nenhum destes titulos, que o usuario ja assistiu: "
         f"{excluded_text}\n\n"
+        f"Responda EXATAMENTE nesse formato, repetindo o bloco pra cada "
+        f"opcao (se nao achar {RECOMMEND_COUNT}, retorne quantas conseguir, "
+        "pode ser so 1 ou 2), sem markdown e sem texto extra:\n\n"
+        "OPCAO 1\n"
         f"{RESPONSE_FORMAT}\n\n"
-        "Se nao conseguir achar nenhuma recomendacao boa pro pedido, "
-        "responda exatamente:\nTITULO: DESCONHECIDO"
+        "OPCAO 2\n"
+        "(mesmo formato acima)\n\n"
+        "OPCAO 3\n"
+        "(mesmo formato acima)\n\n"
+        "Se nao conseguir achar nenhuma opcao boa pro pedido, responda "
+        "exatamente:\nOPCAO 1\nTITULO: DESCONHECIDO"
     )
     response = gemini_client.models.generate_content(
         model=GEMINI_MODEL, contents=[prompt], config=gemini_search_config()
     )
-    return parse_analysis((response.text or "").strip())
+    text = (response.text or "").strip()
+    blocks = re.split(r"OPCAO\s*\d+", text, flags=re.IGNORECASE)
+    results = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        data = parse_analysis(block)
+        if data.get("title") and data["title"].strip().upper() != "DESCONHECIDO":
+            results.append(data)
+    return results[:RECOMMEND_COUNT]
 
 
 _recommend_cache: dict = {}
@@ -278,8 +305,8 @@ def cache_recommendation(chat_id: int, title: str, data: dict) -> str:
     return token
 
 
-def format_recommendation_message(title: str, data: dict) -> str:
-    lines = [f"🎯 <b>Recomendacao:</b> {html.escape(title)}"]
+def format_option_block(idx: int, title: str, data: dict) -> str:
+    lines = [f"<b>{idx}. {html.escape(title)}</b>"]
     tags = [t for t in [data.get("media_type", ""), data.get("genre", "")] if t]
     if tags:
         lines.append("🏷 " + html.escape(" · ".join(tags)))
@@ -288,10 +315,10 @@ def format_recommendation_message(title: str, data: dict) -> str:
         lines.append(f"⭐ Nota: {html.escape(rating)}")
     synopsis = data.get("synopsis", "")
     if synopsis:
-        lines.append(f"\n📖 {html.escape(synopsis)}")
+        lines.append(f"📖 {html.escape(synopsis)}")
     where = data.get("where_to_watch", "")
     if where and where.lower() not in ("nao encontrado", "não encontrado"):
-        lines.append(f"\n📺 <b>Onde assistir:</b> {html.escape(where)}")
+        lines.append(f"📺 <b>Onde assistir:</b> {html.escape(where)}")
     return "\n".join(lines)
 
 
@@ -306,7 +333,7 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
 
     await update.message.chat.send_action("typing")
     try:
-        data = await build_recommendation(chat_id, query_text, min_rating)
+        options = await build_recommendations(chat_id, query_text, min_rating)
     except Exception:
         logger.exception("Erro ao buscar recomendacao")
         await update.message.reply_text(
@@ -314,12 +341,22 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
         )
         return
 
-    title = data.get("title", "").strip()
-    got_rating = parse_rating_value(data.get("rating", ""))
-    if min_rating is not None and got_rating is not None and got_rating < min_rating:
-        title = ""  # a IA nao respeitou o filtro, trata como "nao encontrado"
+    seen_titles = set()
+    picked = []
+    for data in options:
+        title = data.get("title", "").strip()
+        if not title:
+            continue
+        normalized = normalize_title(title)
+        if normalized in seen_titles:
+            continue
+        got_rating = parse_rating_value(data.get("rating", ""))
+        if min_rating is not None and got_rating is not None and got_rating < min_rating:
+            continue  # a IA nao respeitou o filtro, descarta essa opcao
+        seen_titles.add(normalized)
+        picked.append((title, data))
 
-    if not title or title.upper() == "DESCONHECIDO":
+    if not picked:
         msg = "Nao encontrei uma recomendacao boa pra esse pedido."
         if min_rating is not None:
             msg += f" Nada com nota {min_rating}+ apareceu pra esse genero/plataforma."
@@ -327,11 +364,16 @@ async def handle_recommend(update: Update, chat_id: int, query_text: str) -> Non
         await update.message.reply_text(msg)
         return
 
-    token = cache_recommendation(chat_id, title, data)
-    text = format_recommendation_message(title, data)
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("➕ Adicionar a lista", callback_data=f"radd|{token}")]]
-    )
+    blocks = []
+    buttons = []
+    for i, (title, data) in enumerate(picked, start=1):
+        blocks.append(format_option_block(i, title, data))
+        token = cache_recommendation(chat_id, title, data)
+        buttons.append(InlineKeyboardButton(f"➕ {i}", callback_data=f"radd|{token}"))
+
+    title_word = "Recomendacao" if len(picked) == 1 else "Recomendacoes"
+    text = f"🎯 <b>{title_word}</b>\n\n" + "\n\n".join(blocks)
+    keyboard = InlineKeyboardMarkup([buttons])
     await update.message.reply_html(text, reply_markup=keyboard)
 
 
@@ -870,6 +912,65 @@ async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_list(update, update.effective_chat.id, "r")
 
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM items WHERE chat_id = ? AND status != 'removido'", (chat_id,)
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_html("📊 <b>Estatisticas</b>\n\n<i>Sua lista esta vazia.</i>")
+        return
+
+    total = len(rows)
+    watched_rows = [r for r in rows if r["status"] == "assistido"]
+    pending = total - len(watched_rows)
+
+    by_category: dict = {}
+    genre_counts: dict = {}
+    for r in rows:
+        cat = category_of(r)
+        by_category[cat] = by_category.get(cat, 0) + 1
+        for g in genres_of(r):
+            if g == UNKNOWN_GENRE:
+                continue
+            genre_counts[g] = genre_counts.get(g, 0) + 1
+
+    now = datetime.utcnow()
+    watched_this_month = 0
+    for r in watched_rows:
+        wa = r["watched_at"]
+        if not wa:
+            continue
+        try:
+            dt = datetime.fromisoformat(wa)
+        except ValueError:
+            continue
+        if dt.year == now.year and dt.month == now.month:
+            watched_this_month += 1
+
+    lines = ["📊 <b>Estatisticas</b>", ""]
+    lines.append(f"Total na lista: <b>{total}</b>")
+    lines.append(f"✅ Assistidos: {len(watched_rows)}   🍿 Para assistir: {pending}")
+
+    if by_category:
+        cat_parts = [
+            f"{MEDIA_TYPE_ICON.get(c, '')} {c}: {n}"
+            for c, n in sorted(by_category.items(), key=lambda kv: -kv[1])
+        ]
+        lines.append(" · ".join(cat_parts))
+
+    if genre_counts:
+        top_genre, top_count = max(genre_counts.items(), key=lambda kv: kv[1])
+        lines.append(f"🏷 Genero mais comum: {html.escape(top_genre)} ({top_count}x)")
+
+    lines.append(f"📅 Assistidos esse mes: {watched_this_month}")
+
+    await update.message.reply_html("\n".join(lines))
+
+
 def todos_header(rows: list, page: int) -> tuple:
     total_pages = max(1, (len(rows) + TODOS_PAGE_SIZE - 1) // TODOS_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -1020,14 +1121,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             conn = get_conn()
             if action == "dm":
                 conn.execute(
-                    "UPDATE items SET status = 'assistido' WHERE id = ? AND chat_id = ?",
-                    (item_id, chat_id),
+                    "UPDATE items SET status = 'assistido', watched_at = ? WHERE id = ? AND chat_id = ?",
+                    (datetime.utcnow().isoformat(), item_id, chat_id),
                 )
                 conn.commit()
                 await query.answer("Marcado como assistido ✅")
             elif action == "u":
                 conn.execute(
-                    "UPDATE items SET status = 'para assistir' WHERE id = ? AND chat_id = ?",
+                    "UPDATE items SET status = 'para assistir', watched_at = NULL WHERE id = ? AND chat_id = ?",
                     (item_id, chat_id),
                 )
                 conn.commit()
@@ -1132,10 +1233,11 @@ async def set_status(update, context, status, ok_msg):
         await update.message.reply_text("ID invalido.")
         return
 
+    watched_at = datetime.utcnow().isoformat() if status == "assistido" else None
     conn = get_conn()
     cur = conn.execute(
-        "UPDATE items SET status = ? WHERE id = ? AND chat_id = ?",
-        (status, item_id, chat_id),
+        "UPDATE items SET status = ?, watched_at = ? WHERE id = ? AND chat_id = ?",
+        (status, watched_at, item_id, chat_id),
     )
     conn.commit()
     changed = cur.rowcount
@@ -1172,6 +1274,44 @@ async def renomear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Renomeado #{item_id} para: {new_title}")
     else:
         await update.message.reply_text("Nao achei esse ID na sua lista.")
+
+
+async def set_field(update, context, column: str, label: str, usage: str) -> None:
+    chat_id = update.effective_chat.id
+    if len(context.args) < 2:
+        await update.message.reply_text(usage)
+        return
+    try:
+        item_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID invalido.")
+        return
+    new_value = " ".join(context.args[1:])
+
+    conn = get_conn()
+    cur = conn.execute(
+        f"UPDATE items SET {column} = ? WHERE id = ? AND chat_id = ?",
+        (new_value, item_id, chat_id),
+    )
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+
+    if changed:
+        await update.message.reply_text(f"{label} de #{item_id} atualizado(a) para: {new_value}")
+    else:
+        await update.message.reply_text("Nao achei esse ID na sua lista.")
+
+
+async def genero(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_field(update, context, "genre", "Genero", "Uso: /genero <id> <novo genero>")
+
+
+async def plataforma(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_field(
+        update, context, "where_to_watch", "Plataforma",
+        "Uso: /plataforma <id> <nova(s) plataforma(s)>",
+    )
 
 
 async def remover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1244,12 +1384,15 @@ def main() -> None:
     app.add_handler(CommandHandler("assistidos", assistidos))
     app.add_handler(CommandHandler("historico", historico))
     app.add_handler(CommandHandler("todos", todos))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("adicionar", adicionar))
     app.add_handler(CommandHandler("recomendar", recomendar))
     app.add_handler(CommandHandler("detalhes", detalhes))
     app.add_handler(CommandHandler("marcar", marcar))
     app.add_handler(CommandHandler("desmarcar", desmarcar))
     app.add_handler(CommandHandler("renomear", renomear))
+    app.add_handler(CommandHandler("genero", genero))
+    app.add_handler(CommandHandler("plataforma", plataforma))
     app.add_handler(CommandHandler("remover", remover))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

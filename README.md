@@ -312,6 +312,13 @@ pra abrir os detalhes daquele item.
 - `/desmarcar <id>` — volta o item para a lista de "para assistir".
 - `/renomear <id> <nome certo>` — corrige o título, caso a IA tenha
   identificado errado.
+- `/genero <id> <novo gênero>` — corrige o gênero sem precisar remover e
+  recadastrar o item.
+- `/plataforma <id> <nova plataforma>` — corrige onde assistir, mesma
+  ideia do `/genero`.
+- `/stats` — mostra um resumo da sua lista: total, quantos assistidos vs.
+  pendentes, quebra por Filme/Série/Anime, gênero mais comum e quantos
+  você assistiu esse mês.
 - `/remover <id>` — remove da lista (vai pro `/historico`, não apaga de vez).
   Diferente do botão, o comando direto não pede confirmação — digitar o ID
   exato já é uma ação deliberada.
@@ -335,9 +342,10 @@ sempre evita sugerir algo que já está marcado como **assistido** na sua
 lista (itens que ainda estão "para assistir" podem aparecer de novo, já
 que tecnicamente você ainda não viu).
 
-A resposta vem com sinopse, nota e onde assistir, junto de um botão
-**➕ Adicionar à lista** — se gostar da sugestão, é só tocar nele, sem
-precisar digitar o nome de novo.
+O bot busca até **3 opções diferentes** de uma vez (menos se não achar
+tantas assim). Cada uma vem com sinopse, nota e onde assistir, e um botão
+numerado (➕ 1, ➕ 2, ➕ 3) — toca no número da que você gostou pra
+adicionar direto na lista, sem precisar digitar o nome de novo.
 
 Duas formas de pedir:
 - Comando explícito: `/recomendar <descrição>` (funciona em qualquer
@@ -356,6 +364,18 @@ recomenda algo que atenda esse critério. Funciona com frases como:
 Se nada disponível bater com o gênero/plataforma pedidos **e** a nota
 mínima ao mesmo tempo, o bot avisa que não achou em vez de forçar uma
 sugestão ruim.
+
+## Estatísticas (`/stats`)
+
+Mostra um resumo rápido: total de títulos, quantos assistidos vs.
+pendentes, quebra por categoria (Filme/Série/Anime), o gênero que mais
+aparece na sua lista, e quantos você assistiu no mês atual.
+
+Um detalhe sobre o "assistidos esse mês": o bot só passou a guardar a
+*data em que você marcou como assistido* (campo `watched_at`) a partir da
+versão com esse recurso. Itens que já estavam marcados como assistidos
+antes disso não têm essa data e não entram nessa contagem específica —
+mas continuam contando normalmente no total geral de assistidos.
 
 ## Lembrete de itens parados
 
