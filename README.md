@@ -298,6 +298,8 @@ pra abrir os detalhes daquele item.
   - Em qualquer um dos dois caminhos, só aparecem as opções que você
     realmente tem cadastradas — nada de categoria ou plataforma vazia.
 - `/assistidos` funciona do mesmo jeito, mas para o que você já assistiu.
+- `/andamento` mostra séries e animes que você está assistindo agora, com
+  barra de progresso por episódio.
 - `/historico` mostra os itens removidos, com opção de restaurar.
 - Ao tocar num título, aparece a sinopse completa, a nota, onde assistir, e
   botões pra marcar como assistido ou remover. **Essas duas ações sempre
@@ -386,6 +388,34 @@ recomenda algo que atenda esse critério. Funciona com frases como:
 Se nada disponível bater com o gênero/plataforma pedidos **e** a nota
 mínima ao mesmo tempo, o bot avisa que não achou em vez de forçar uma
 sugestão ruim.
+
+## Acompanhando o progresso (séries e animes)
+
+Filme é binário — assistiu ou não. Série e anime têm um terceiro estado:
+**"Assistindo"**, com uma barra de progresso por episódio.
+
+Como funciona:
+1. Ao adicionar uma série ou anime, o bot já tenta descobrir o número
+   total de episódios lançados (via busca na internet).
+2. Nos detalhes de um item "para assistir" desse tipo, aparece o botão
+   **▶️ Comecei a assistir** — toca nele e o item vira "Assistindo",
+   começando do episódio 0.
+3. A tela de detalhes passa a mostrar uma barra tipo
+   `🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜ 50% (6/12)`, com botões **➕/➖ Episódio** pra ir
+   marcando onde você parou. Cada toque no ➕ mostra um aviso rápido
+   ("Episódio 7/12 🍿") e, ao chegar no último episódio, um "🎉 Você
+   chegou no último episódio!".
+4. Quando terminar, é só tocar em **✅ Concluir** (mesma confirmação usada
+   pra marcar qualquer coisa como assistida). Também dá pra **↩️ Parar de
+   assistir**, que volta o item pra "para assistir" sem perder o registro.
+5. `/andamento` lista só o que está "Assistindo" no momento, e `/todos`
+   mostra o ▶️ com a porcentagem direto no botão de cada item em
+   andamento.
+
+Se o bot não conseguir descobrir o número de episódios de um título (bem
+raro, mas acontece com lançamentos muito recentes), o botão "Comecei a
+assistir" não aparece — nesse caso, marque como assistido normalmente
+quando terminar.
 
 ## Estatísticas (`/stats`)
 

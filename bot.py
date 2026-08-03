@@ -52,7 +52,11 @@ RESPONSE_FORMAT = (
     "Paramount+, Star+, Apple TV+, Mubi, Crunchyroll), separadas por virgula. "
     "Pesquise ativamente antes de desistir: quase todo titulo conhecido esta "
     "em alguma dessas plataformas ou disponivel para aluguel/compra. So "
-    "escreva 'Nao encontrado' se realmente nao existir nenhuma opcao legal.>"
+    "escreva 'Nao encontrado' se realmente nao existir nenhuma opcao legal.>\n"
+    "EPISODIOS: <se for Serie ou Anime, o numero total de episodios ja "
+    "lancados (todas as temporadas somadas, numero inteiro); se for Filme, "
+    "escreva 'N/A'; se nao conseguir descobrir o numero, escreva "
+    "'Nao encontrado'>"
 )
 
 ANALYSIS_PROMPT = (
@@ -94,6 +98,9 @@ def init_db():
     for col in ("media_type", "genre", "rating", "synopsis", "where_to_watch", "watched_at"):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE items ADD COLUMN {col} TEXT")
+    for col in ("total_episodes", "current_episode"):
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE items ADD COLUMN {col} INTEGER")
     conn.commit()
     conn.close()
 
@@ -107,6 +114,8 @@ HELP_TEXT = (
     "/lista - navegar pelo que falta assistir (escolhe por plataforma ou "
     "por genero, depois vai afunilando ate o titulo)\n"
     "/assistidos - navegar pelo que ja foi assistido\n"
+    "/andamento - series e animes que voce esta assistindo agora, com "
+    "barra de progresso por episodio\n"
     "/todos - lista simples com tudo (genero e status na frente de cada "
     "titulo), toque pra ver a sinopse\n"
     "/historico - ver itens removidos e restaurar se quiser\n"
@@ -137,6 +146,11 @@ HELP_TEXT = (
     "entre os titulos ativos da sua lista — nao e um codigo fixo. Ou seja, "
     "se voce remove um item ou limpa a lista toda, os numeros se "
     "reorganizam sozinhos, sem buracos.\n\n"
+    "Pra series e animes, ao abrir os detalhes de um item 'para assistir' "
+    "aparece o botao '▶️ Comecei a assistir' — ele muda o status pra "
+    "'assistindo' e mostra uma barra de progresso por episodio, com "
+    "botoes ➕/➖ pra ir marcando onde voce parou. Ao chegar no ultimo "
+    "episodio, e so tocar em '✅ Concluir'.\n\n"
     "<b>Em grupos:</b> por padrao o Telegram so deixa o bot ver mensagens "
     "que sao comandos. Prints funcionam normalmente assim que voce "
     "desativar o Modo Privacidade no @BotFather. Ja texto solto (sem "
@@ -158,6 +172,7 @@ def parse_analysis(text: str) -> dict:
         "rating": "",
         "synopsis": "",
         "where_to_watch": "",
+        "episodes": "",
     }
     patterns = {
         "title": re.compile(r"^TITULO\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
@@ -168,6 +183,7 @@ def parse_analysis(text: str) -> dict:
         "where_to_watch": re.compile(
             r"^ONDE_ASSISTIR\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE
         ),
+        "episodes": re.compile(r"^EPISODIOS\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
     }
     for key, pattern in patterns.items():
         match = pattern.search(text)
@@ -491,12 +507,21 @@ def item_button_label(row: sqlite3.Row) -> str:
 
 def all_items_button_label(row: sqlite3.Row, order_map: dict | None = None) -> str:
     # Telegram nao deixa colorir o texto do botao; usamos um circulo colorido
-    # como aproximacao visual: verde = assistido, amarelo = pendente.
-    status_icon = "🟢" if row["status"] == "assistido" else "🟡"
+    # como aproximacao visual: verde = assistido, amarelo = pendente,
+    # e um play pra quem esta em andamento (com o progresso junto).
+    if row["status"] == "assistido":
+        status_icon = "🟢"
+    elif row["status"] == "assistindo":
+        status_icon = "▶️"
+    else:
+        status_icon = "🟡"
     genre_list = genres_of(row)
     genre = genre_list[0] if genre_list and genre_list[0] != UNKNOWN_GENRE else ""
     label = f"#{item_number(row, order_map)} {status_icon} {row['title']}"
-    if genre:
+    if row["status"] == "assistindo" and row["total_episodes"]:
+        pct = round(min(max((row["current_episode"] or 0) / row["total_episodes"], 0), 1) * 100)
+        label += f" ({pct}%)"
+    elif genre:
         label += f" ({genre})"
     if len(label) > 60:
         label = label[:57] + "..."
@@ -554,12 +579,26 @@ async def warn_duplicate(update: Update, chat_id: int, row: sqlite3.Row) -> None
     await update.message.reply_html(text, reply_markup=keyboard)
 
 
+def parse_episode_count(value: str) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"\d+", value)
+    if not match:
+        return None
+    try:
+        return int(match.group())
+    except ValueError:
+        return None
+
+
 def insert_new_item(chat_id: int, title: str, data: dict) -> int:
+    total_episodes = parse_episode_count(data.get("episodes", ""))
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO items "
-        "(chat_id, title, media_type, genre, rating, synopsis, where_to_watch, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(chat_id, title, media_type, genre, rating, synopsis, where_to_watch, "
+        "total_episodes, current_episode, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             chat_id,
             title[:200],
@@ -568,6 +607,8 @@ def insert_new_item(chat_id: int, title: str, data: dict) -> int:
             (data.get("rating") or "")[:20] or None,
             (data.get("synopsis") or "")[:1000] or None,
             (data.get("where_to_watch") or "")[:300] or None,
+            total_episodes,
+            0,
             "para assistir",
             datetime.utcnow().isoformat(),
         ),
@@ -718,9 +759,14 @@ async def recomendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 #   modo "f" (plataforma primeiro): plataforma -> categoria -> genero
 #   modo "g" (genero primeiro):     genero -> categoria -> plataforma
 
-STATUS_BY_KEY = {"p": "para assistir", "a": "assistido", "r": "removido"}
+STATUS_BY_KEY = {"p": "para assistir", "w": "assistindo", "a": "assistido", "r": "removido"}
 KEY_BY_STATUS = {v: k for k, v in STATUS_BY_KEY.items()}
-LIST_TITLES = {"p": "🍿 Para assistir", "a": "✅ Ja assistidos", "r": "🗑 Historico de removidos"}
+LIST_TITLES = {
+    "p": "🍿 Para assistir",
+    "w": "▶️ Em andamento",
+    "a": "✅ Ja assistidos",
+    "r": "🗑 Historico de removidos",
+}
 
 DIM_ORDER = {"f": ["plat", "cat", "genre"], "g": ["genre", "cat", "plat"], "t": []}
 DIM_ICON = {"plat": "📺", "cat": None, "genre": "🏷"}  # cat usa MEDIA_TYPE_ICON
@@ -874,9 +920,24 @@ def breadcrumb_text(breadcrumb: list) -> str:
 
 STATUS_LABEL = {
     "para assistir": "Para assistir 🍿",
+    "assistindo": "Assistindo ▶️",
     "assistido": "Assistido ✅",
     "removido": "Removido 🗑",
 }
+
+
+def can_track_episodes(row: sqlite3.Row) -> bool:
+    return category_of(row) in ("Série", "Anime") and bool(row["total_episodes"])
+
+
+def progress_bar(current: int, total: int, length: int = 10) -> str:
+    if not total or total <= 0:
+        return ""
+    ratio = min(max(current / total, 0), 1)
+    filled = round(ratio * length)
+    bar = "🟩" * filled + "⬜" * (length - filled)
+    pct = round(ratio * 100)
+    return f"{bar} {pct}% ({current}/{total})"
 
 
 def item_detail_text(row: sqlite3.Row) -> str:
@@ -888,6 +949,9 @@ def item_detail_text(row: sqlite3.Row) -> str:
     if row["rating"] and row["rating"].lower() not in ("nao encontrado", "não encontrado"):
         lines.append(f"⭐ Nota: {html.escape(row['rating'])}")
     lines.append(f"Status: {STATUS_LABEL.get(row['status'], row['status'])}")
+    if row["status"] == "assistindo" and row["total_episodes"]:
+        bar = progress_bar(row["current_episode"] or 0, row["total_episodes"])
+        lines.append(f"📺 {bar}")
     lines.append(f"Adicionado em: {date_str}")
     if row["synopsis"]:
         lines.append(f"\n📖 {html.escape(row['synopsis'])}")
@@ -922,14 +986,28 @@ def build_detail_view(row: sqlite3.Row, path: tuple):
                 [back_button],
             ]
         )
+    elif row["status"] == "assistindo":
+        current = row["current_episode"] or 0
+        total = row["total_episodes"] or 0
+        nav_row = []
+        if current > 0:
+            nav_row.append(InlineKeyboardButton("➖ Episodio", callback_data=f"epi|-1|{suffix}"))
+        if not total or current < total:
+            nav_row.append(InlineKeyboardButton("➕ Episodio", callback_data=f"epi|1|{suffix}"))
+        rows_kb = [nav_row] if nav_row else []
+        rows_kb.append([InlineKeyboardButton("✅ Concluir", callback_data=f"cm|{suffix}")])
+        rows_kb.append([InlineKeyboardButton("↩️ Parar de assistir", callback_data=f"u|{suffix}")])
+        rows_kb.append([InlineKeyboardButton("🗑 Remover", callback_data=f"cx|{suffix}")])
+        rows_kb.append([back_button])
+        keyboard = InlineKeyboardMarkup(rows_kb)
     else:
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("✅ Marcar como assistido", callback_data=f"cm|{suffix}")],
-                [InlineKeyboardButton("🗑 Remover", callback_data=f"cx|{suffix}")],
-                [back_button],
-            ]
-        )
+        buttons = []
+        if can_track_episodes(row):
+            buttons.append([InlineKeyboardButton("▶️ Comecei a assistir", callback_data=f"sw|{suffix}")])
+        buttons.append([InlineKeyboardButton("✅ Marcar como assistido", callback_data=f"cm|{suffix}")])
+        buttons.append([InlineKeyboardButton("🗑 Remover", callback_data=f"cx|{suffix}")])
+        buttons.append([back_button])
+        keyboard = InlineKeyboardMarkup(buttons)
     return text, keyboard
 
 
@@ -971,6 +1049,10 @@ async def lista(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def assistidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_list(update, update.effective_chat.id, "a")
+
+
+async def andamento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_list(update, update.effective_chat.id, "w")
 
 
 async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1198,6 +1280,69 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             confirm_action = "m" if action == "cm" else "x"
             text, keyboard = build_confirm_view(row, confirm_action, suffix)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+
+        if action == "sw":
+            item_id = int(parts[1])
+            status_key, mode = parts[2], parts[3]
+            indices = [int(p) for p in parts[4:]]
+            conn = get_conn()
+            conn.execute(
+                "UPDATE items SET status = 'assistindo', current_episode = 0 "
+                "WHERE id = ? AND chat_id = ?",
+                (item_id, chat_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+            ).fetchone()
+            conn.close()
+            await query.answer("Comecei a assistir ▶️")
+            new_status_key = KEY_BY_STATUS.get(row["status"], status_key)
+            path = (
+                (new_status_key, mode, indices)
+                if new_status_key == status_key
+                else resolve_path_for_row(chat_id, row, mode)
+            )
+            text, keyboard = build_detail_view(row, path)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+
+        if action == "epi":
+            delta = int(parts[1])
+            item_id = int(parts[2])
+            status_key, mode = parts[3], parts[4]
+            indices = [int(p) for p in parts[5:]]
+
+            conn = get_conn()
+            row = conn.execute(
+                "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+            ).fetchone()
+            if not row:
+                conn.close()
+                await query.answer()
+                await query.edit_message_text("Nao achei esse item (pode ter sido removido).")
+                return
+
+            total = row["total_episodes"] or 0
+            new_ep = (row["current_episode"] or 0) + delta
+            new_ep = max(0, min(new_ep, total) if total else max(new_ep, 0))
+            conn.execute(
+                "UPDATE items SET current_episode = ? WHERE id = ? AND chat_id = ?",
+                (new_ep, item_id, chat_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
+            ).fetchone()
+            conn.close()
+
+            toast = f"Episodio {new_ep}/{total} 🍿" if total else f"Episodio {new_ep}"
+            if total and new_ep >= total:
+                toast = "🎉 Você chegou no ultimo episodio!"
+            await query.answer(toast)
+            text, keyboard = build_detail_view(row, (status_key, mode, indices))
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
@@ -1505,6 +1650,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("assistidos", assistidos))
+    app.add_handler(CommandHandler("andamento", andamento))
     app.add_handler(CommandHandler("historico", historico))
     app.add_handler(CommandHandler("todos", todos))
     app.add_handler(CommandHandler("stats", stats))
