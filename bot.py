@@ -109,7 +109,14 @@ HELP_TEXT = (
     "/renomear &lt;id&gt; &lt;nome certo&gt; - corrigir o titulo\n"
     "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n"
     "/adicionar &lt;nome&gt; - adicionar um titulo por texto (funciona em "
-    "grupos)\n\n"
+    "grupos)\n"
+    "/recomendar &lt;descricao&gt; - pede uma recomendacao (ex: "
+    "/recomendar filme de acao na Netflix). Busca na internet, prioriza o "
+    "que esta em alta e nunca repete algo que voce ja assistiu\n\n"
+    "Voce tambem pode so perguntar direto ('me recomenda uma serie de "
+    "comedia', 'sugere um anime pra assistir') em vez de usar o comando — "
+    "funciona em conversa privada, ou em grupo respondendo a uma mensagem "
+    "do bot.\n\n"
     "Tambem da pra marcar, desmarcar e remover direto pelos botoes que "
     "aparecem no /lista e no /assistidos — marcar como assistido e remover "
     "sempre pedem confirmacao antes de executar.\n\n"
@@ -186,6 +193,103 @@ async def lookup_by_title(title: str) -> dict:
         model=GEMINI_MODEL, contents=[prompt], config=gemini_search_config()
     )
     return parse_analysis((response.text or "").strip())
+
+
+def watched_titles(chat_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT title FROM items WHERE chat_id = ? AND status = 'assistido'", (chat_id,)
+    ).fetchall()
+    conn.close()
+    return [r["title"] for r in rows]
+
+
+async def build_recommendation(chat_id: int, query_text: str) -> dict:
+    excluded = watched_titles(chat_id)
+    excluded_text = ", ".join(excluded) if excluded else "nenhum ainda"
+    prompt = (
+        f"O usuario pediu uma recomendacao de filme, serie ou anime assim: "
+        f"\"{query_text}\".\n"
+        "Use a busca do Google pra saber o que esta em alta ou bem avaliado "
+        "agora, de acordo com o pedido (genero, plataforma, etc, se "
+        "mencionados).\n"
+        "Escolha APENAS UM titulo que atenda ao pedido, esteja atualmente "
+        "popular ou bem avaliado, e esteja disponivel numa das plataformas "
+        "mencionadas pelo usuario (se ele mencionou alguma).\n"
+        f"NAO recomende nenhum destes titulos, que o usuario ja assistiu: "
+        f"{excluded_text}\n\n"
+        f"{RESPONSE_FORMAT}\n\n"
+        "Se nao conseguir achar nenhuma recomendacao boa pro pedido, "
+        "responda exatamente:\nTITULO: DESCONHECIDO"
+    )
+    response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL, contents=[prompt], config=gemini_search_config()
+    )
+    return parse_analysis((response.text or "").strip())
+
+
+_recommend_cache: dict = {}
+_recommend_next_id = 0
+
+
+def cache_recommendation(chat_id: int, title: str, data: dict) -> str:
+    global _recommend_next_id
+    token = str(_recommend_next_id)
+    _recommend_next_id += 1
+    _recommend_cache[token] = {"chat_id": chat_id, "title": title, "data": data}
+    if len(_recommend_cache) > 200:
+        _recommend_cache.pop(next(iter(_recommend_cache)), None)
+    return token
+
+
+def format_recommendation_message(title: str, data: dict) -> str:
+    lines = [f"🎯 <b>Recomendacao:</b> {html.escape(title)}"]
+    tags = [t for t in [data.get("media_type", ""), data.get("genre", "")] if t]
+    if tags:
+        lines.append("🏷 " + html.escape(" · ".join(tags)))
+    rating = data.get("rating", "")
+    if rating and rating.lower() not in ("nao encontrado", "não encontrado"):
+        lines.append(f"⭐ Nota: {html.escape(rating)}")
+    synopsis = data.get("synopsis", "")
+    if synopsis:
+        lines.append(f"\n📖 {html.escape(synopsis)}")
+    where = data.get("where_to_watch", "")
+    if where and where.lower() not in ("nao encontrado", "não encontrado"):
+        lines.append(f"\n📺 <b>Onde assistir:</b> {html.escape(where)}")
+    return "\n".join(lines)
+
+
+async def handle_recommend(update: Update, chat_id: int, query_text: str) -> None:
+    if not gemini_client:
+        await update.message.reply_text(
+            "GEMINI_API_KEY nao configurada no bot. Peça pro admin configurar."
+        )
+        return
+
+    await update.message.chat.send_action("typing")
+    try:
+        data = await build_recommendation(chat_id, query_text)
+    except Exception:
+        logger.exception("Erro ao buscar recomendacao")
+        await update.message.reply_text(
+            "Nao consegui buscar uma recomendacao agora. Tenta de novo daqui a pouco?"
+        )
+        return
+
+    title = data.get("title", "").strip()
+    if not title or title.upper() == "DESCONHECIDO":
+        await update.message.reply_text(
+            "Nao encontrei uma recomendacao boa pra esse pedido. Tenta descrever "
+            "de outro jeito (genero, plataforma)?"
+        )
+        return
+
+    token = cache_recommendation(chat_id, title, data)
+    text = format_recommendation_message(title, data)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("➕ Adicionar a lista", callback_data=f"radd|{token}")]]
+    )
+    await update.message.reply_html(text, reply_markup=keyboard)
 
 
 # --- Normalizacao de campos para agrupamento --------------------------------
@@ -302,12 +406,7 @@ async def warn_duplicate(update: Update, chat_id: int, row: sqlite3.Row) -> None
     await update.message.reply_html(text, reply_markup=keyboard)
 
 
-async def save_item(update: Update, chat_id: int, title: str, data: dict) -> None:
-    duplicate = find_duplicate(chat_id, title)
-    if duplicate:
-        await warn_duplicate(update, chat_id, duplicate)
-        return
-
+def insert_new_item(chat_id: int, title: str, data: dict) -> int:
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO items "
@@ -328,7 +427,16 @@ async def save_item(update: Update, chat_id: int, title: str, data: dict) -> Non
     conn.commit()
     item_id = cur.lastrowid
     conn.close()
+    return item_id
 
+
+async def save_item(update: Update, chat_id: int, title: str, data: dict) -> None:
+    duplicate = find_duplicate(chat_id, title)
+    if duplicate:
+        await warn_duplicate(update, chat_id, duplicate)
+        return
+
+    item_id = insert_new_item(chat_id, title, data)
     await update.message.reply_html(format_new_item_message(item_id, title, data))
 
 
@@ -405,10 +513,15 @@ async def process_title_text(update: Update, chat_id: int, title: str) -> None:
     await save_item(update, chat_id, title, data)
 
 
+_RECOMMEND_TRIGGERS = re.compile(
+    r"\b(recomend\w*|indic\w*|sugest\w*|sugir\w*|sugere\w*)\b", re.IGNORECASE
+)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Em grupos/canais, so tratamos texto solto como titulo se for resposta
-    # direta a uma mensagem do proprio bot (evita anotar conversa alheia
-    # como se fosse nome de filme). Em conversa privada, funciona sempre.
+    # Em grupos/canais, so tratamos texto solto se for resposta direta a
+    # uma mensagem do proprio bot (evita anotar conversa alheia como se
+    # fosse nome de filme). Em conversa privada, funciona sempre.
     if update.effective_chat.type != "private":
         replied = update.message.reply_to_message
         is_reply_to_bot = bool(
@@ -418,7 +531,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
     chat_id = update.effective_chat.id
-    await process_title_text(update, chat_id, update.message.text or "")
+    text = update.message.text or ""
+
+    if _RECOMMEND_TRIGGERS.search(text):
+        await handle_recommend(update, chat_id, text)
+        return
+
+    await process_title_text(update, chat_id, text)
 
 
 async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -428,6 +547,18 @@ async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     title = " ".join(context.args)
     await process_title_text(update, chat_id, title)
+
+
+async def recomendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /recomendar <descricao>\n"
+            "Ex: /recomendar filme de acao na Netflix"
+        )
+        return
+    chat_id = update.effective_chat.id
+    query_text = " ".join(context.args)
+    await handle_recommend(update, chat_id, query_text)
 
 
 # --- Navegacao interativa: por Plataforma ou por Genero --------------------
@@ -690,6 +821,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action = parts[0]
 
     try:
+        if action == "radd":
+            token = parts[1]
+            entry = _recommend_cache.pop(token, None)
+            await query.answer()
+            if not entry:
+                await query.edit_message_text(
+                    "Essa recomendacao expirou. Peça uma nova com /recomendar."
+                )
+                return
+            r_chat_id, title, data = entry["chat_id"], entry["title"], entry["data"]
+            duplicate = find_duplicate(r_chat_id, title)
+            if duplicate:
+                status_label = (
+                    "assistido ✅" if duplicate["status"] == "assistido" else "na sua lista pra assistir 🍿"
+                )
+                await query.edit_message_text(
+                    f"⚠️ <b>{html.escape(title)}</b> ja esta {status_label} (#{duplicate['id']}).",
+                    parse_mode="HTML",
+                )
+                return
+            item_id = insert_new_item(r_chat_id, title, data)
+            await query.edit_message_text(
+                format_new_item_message(item_id, title, data), parse_mode="HTML"
+            )
+            return
+
         if action == "todos":
             rows = fetch_rows(chat_id, "t")
             header = MODE_LABEL["t"]
@@ -979,6 +1136,7 @@ def main() -> None:
     app.add_handler(CommandHandler("historico", historico))
     app.add_handler(CommandHandler("todos", todos))
     app.add_handler(CommandHandler("adicionar", adicionar))
+    app.add_handler(CommandHandler("recomendar", recomendar))
     app.add_handler(CommandHandler("detalhes", detalhes))
     app.add_handler(CommandHandler("marcar", marcar))
     app.add_handler(CommandHandler("desmarcar", desmarcar))

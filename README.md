@@ -27,6 +27,11 @@ zero, mesmo que você nunca tenha feito nada parecido antes.
   não), o bot avisa em vez de cadastrar duplicado.
 - Dá pra marcar como assistido, desmarcar, corrigir o nome ou remover, tudo
   pelos botões ou por comando.
+- Dá pra pedir recomendação (`/recomendar filme de terror na Netflix`, ou
+  só perguntar direto no chat). O bot busca na internet o que está bombando
+  ou bem avaliado de acordo com o pedido, e nunca repete algo que você já
+  marcou como assistido. Se gostar, é só tocar num botão pra já adicionar
+  na lista.
 
 ## Antes de começar
 
@@ -281,9 +286,34 @@ pra abrir os detalhes daquele item.
 - `/adicionar <nome>` — adiciona um título por texto explicitamente
   (principal jeito de adicionar por texto dentro de um grupo, veja a seção
   abaixo).
+- `/recomendar <descrição>` — pede uma recomendação (ex: `/recomendar
+  serie de comedia no Prime ou na Max`). Também dá pra só perguntar direto
+  em linguagem natural ("me indica um anime bom", "sugere um filme de
+  terror") em vez de usar o comando.
 
 O número (`<id>`) de cada item aparece nas telas de detalhes e nas mensagens
 de confirmação quando você adiciona algo novo.
+
+## Pedindo recomendação
+
+Quando você pede uma recomendação, o bot faz uma busca real na internet
+(via Gemini com Google Search) pra saber o que está em alta ou bem avaliado
+de acordo com o que você descreveu — gênero, plataforma, ou os dois. Ele
+sempre evita sugerir algo que já está marcado como **assistido** na sua
+lista (itens que ainda estão "para assistir" podem aparecer de novo, já
+que tecnicamente você ainda não viu).
+
+A resposta vem com sinopse, nota e onde assistir, junto de um botão
+**➕ Adicionar à lista** — se gostar da sugestão, é só tocar nele, sem
+precisar digitar o nome de novo.
+
+Duas formas de pedir:
+- Comando explícito: `/recomendar <descrição>` (funciona em qualquer
+  lugar, inclusive grupos)
+- Linguagem natural: qualquer mensagem contendo palavras como "recomenda",
+  "indica" ou "sugere" — funciona em conversa privada, ou em grupo
+  respondendo a uma mensagem do bot (mesma regra do texto livre explicada
+  na seção de grupos, abaixo)
 
 ## Usando o bot em um grupo
 
