@@ -247,6 +247,10 @@ de novo — ele avisa que já existe, mostra o status atual e te dá botões
 pra abrir os detalhes daquele item.
 
 **Navegar pela lista:**
+- `/todos` mostra tudo numa lista só, sem etapas — cada botão já vem com o
+  gênero e um marcador de status (🍿 pra assistir, ✅ assistido) na frente
+  do título. Toca no título e abre a sinopse completa, com os mesmos
+  botões de marcar/remover das outras telas.
 - `/lista` pergunta primeiro: navegar **por plataforma** ou **por gênero**?
   - Por plataforma: você toca na plataforma de streaming, depois na
     categoria (Filme, Série ou Anime), depois no gênero, até chegar no

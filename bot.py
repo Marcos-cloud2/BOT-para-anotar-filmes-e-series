@@ -100,6 +100,8 @@ HELP_TEXT = (
     "/lista - navegar pelo que falta assistir (escolhe por plataforma ou "
     "por genero, depois vai afunilando ate o titulo)\n"
     "/assistidos - navegar pelo que ja foi assistido\n"
+    "/todos - lista simples com tudo (genero e status na frente de cada "
+    "titulo), toque pra ver a sinopse\n"
     "/historico - ver itens removidos e restaurar se quiser\n"
     "/detalhes &lt;id&gt; - ver todos os detalhes de um item pelo numero\n"
     "/marcar &lt;id&gt; - marcar como assistido\n"
@@ -224,6 +226,18 @@ def rating_prefix(row: sqlite3.Row) -> str:
 def item_button_label(row: sqlite3.Row) -> str:
     prefix = rating_prefix(row)
     label = f"{prefix} {row['title']}".strip() if prefix else row["title"]
+    if len(label) > 60:
+        label = label[:57] + "..."
+    return label
+
+
+def all_items_button_label(row: sqlite3.Row) -> str:
+    status_icon = "✅" if row["status"] == "assistido" else "🍿"
+    genre_list = genres_of(row)
+    genre = genre_list[0] if genre_list and genre_list[0] != UNKNOWN_GENRE else ""
+    label = f"{status_icon} {row['title']}"
+    if genre:
+        label += f" ({genre})"
     if len(label) > 60:
         label = label[:57] + "..."
     return label
@@ -396,18 +410,30 @@ STATUS_BY_KEY = {"p": "para assistir", "a": "assistido", "r": "removido"}
 KEY_BY_STATUS = {v: k for k, v in STATUS_BY_KEY.items()}
 LIST_TITLES = {"p": "🍿 Para assistir", "a": "✅ Ja assistidos", "r": "🗑 Historico de removidos"}
 
-DIM_ORDER = {"f": ["plat", "cat", "genre"], "g": ["genre", "cat", "plat"]}
+DIM_ORDER = {"f": ["plat", "cat", "genre"], "g": ["genre", "cat", "plat"], "t": []}
 DIM_ICON = {"plat": "📺", "cat": None, "genre": "🏷"}  # cat usa MEDIA_TYPE_ICON
 DIM_LABEL = {"plat": "plataforma", "cat": "categoria", "genre": "genero"}
-MODE_LABEL = {"f": "Por plataforma", "g": "Por genero"}
+MODE_LABEL = {"f": "Por plataforma", "g": "Por genero", "t": "📋 Todos os titulos"}
 
 
 def fetch_rows(chat_id: int, status_key: str) -> list:
+    if status_key == "t":
+        return fetch_all_rows(chat_id)
     status = STATUS_BY_KEY[status_key]
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM items WHERE chat_id = ? AND status = ? ORDER BY id",
         (chat_id, status),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def fetch_all_rows(chat_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM items WHERE chat_id = ? AND status != 'removido' ORDER BY title COLLATE NOCASE",
+        (chat_id,),
     ).fetchall()
     conn.close()
     return rows
@@ -490,17 +516,19 @@ def kb_dim_options(status_key: str, mode: str, indices: list, rows: list) -> Inl
 
 
 def kb_items(status_key: str, mode: str, indices: list, rows: list) -> InlineKeyboardMarkup:
+    label_fn = all_items_button_label if mode == "t" else item_button_label
     buttons = [
         [
             InlineKeyboardButton(
-                item_button_label(r),
-                callback_data=f"v|{r['id']}|{status_key}|{mode}|" + "|".join(str(i) for i in indices),
+                label_fn(r),
+                callback_data="|".join(["v", str(r["id"]), status_key, mode] + [str(i) for i in indices]),
             )
         ]
         for r in rows
     ]
-    back_cb = nav_callback(status_key, mode, indices[:-1])
-    buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
+    if mode != "t":
+        back_cb = nav_callback(status_key, mode, indices[:-1])
+        buttons.append([InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -536,9 +564,9 @@ def build_detail_view(row: sqlite3.Row, path: tuple):
     status_key, mode, indices = path
     text = item_detail_text(row)
 
-    idx_suffix = "|".join(str(i) for i in indices)
-    suffix = f"{row['id']}|{status_key}|{mode}|{idx_suffix}"
-    back_button = InlineKeyboardButton("⬅️ Voltar", callback_data=nav_callback(status_key, mode, indices))
+    suffix = "|".join([str(row["id"]), status_key, mode] + [str(i) for i in indices])
+    back_cb = "todos" if mode == "t" else nav_callback(status_key, mode, indices)
+    back_button = InlineKeyboardButton("⬅️ Voltar", callback_data=back_cb)
 
     if row["status"] == "assistido":
         keyboard = InlineKeyboardMarkup(
@@ -610,6 +638,19 @@ async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_list(update, update.effective_chat.id, "r")
 
 
+async def todos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    rows = fetch_rows(chat_id, "t")
+    header = MODE_LABEL["t"]
+    if not rows:
+        await update.message.reply_html(f"{header}\n\n<i>Vazio por aqui.</i>")
+        return
+    await update.message.reply_html(
+        f"{header}\n\nToque num titulo:",
+        reply_markup=kb_items("t", "t", [], rows),
+    )
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat.id
@@ -617,6 +658,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action = parts[0]
 
     try:
+        if action == "todos":
+            rows = fetch_rows(chat_id, "t")
+            header = MODE_LABEL["t"]
+            await query.answer()
+            if not rows:
+                await query.edit_message_text(f"{header}\n\nVazio por aqui.")
+                return
+            await query.edit_message_text(
+                f"{header}\n\nToque num titulo:",
+                reply_markup=kb_items("t", "t", [], rows),
+            )
+            return
+
         if action == "root":
             status_key = parts[1]
             rows = fetch_rows(chat_id, status_key)
@@ -891,6 +945,7 @@ def main() -> None:
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("assistidos", assistidos))
     app.add_handler(CommandHandler("historico", historico))
+    app.add_handler(CommandHandler("todos", todos))
     app.add_handler(CommandHandler("detalhes", detalhes))
     app.add_handler(CommandHandler("marcar", marcar))
     app.add_handler(CommandHandler("desmarcar", desmarcar))
