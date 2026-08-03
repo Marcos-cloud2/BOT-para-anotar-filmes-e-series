@@ -738,7 +738,7 @@ def fetch_rows(chat_id: int, status_key: str) -> list:
 def fetch_all_rows(chat_id: int) -> list:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM items WHERE chat_id = ? AND status != 'removido' ORDER BY title COLLATE NOCASE",
+        "SELECT * FROM items WHERE chat_id = ? AND status != 'removido' ORDER BY id ASC",
         (chat_id,),
     ).fetchall()
     conn.close()
