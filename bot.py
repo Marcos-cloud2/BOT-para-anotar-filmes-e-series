@@ -243,7 +243,7 @@ def all_items_button_label(row: sqlite3.Row) -> str:
     status_icon = "✅" if row["status"] == "assistido" else "🍿"
     genre_list = genres_of(row)
     genre = genre_list[0] if genre_list and genre_list[0] != UNKNOWN_GENRE else ""
-    label = f"{status_icon} {row['title']}"
+    label = f"#{row['id']} {status_icon} {row['title']}"
     if genre:
         label += f" ({genre})"
     if len(label) > 60:
