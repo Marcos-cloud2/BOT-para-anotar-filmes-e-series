@@ -107,10 +107,18 @@ HELP_TEXT = (
     "/marcar &lt;id&gt; - marcar como assistido\n"
     "/desmarcar &lt;id&gt; - voltar pra lista de assistir\n"
     "/renomear &lt;id&gt; &lt;nome certo&gt; - corrigir o titulo\n"
-    "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n\n"
+    "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n"
+    "/adicionar &lt;nome&gt; - adicionar um titulo por texto (funciona em "
+    "grupos)\n\n"
     "Tambem da pra marcar, desmarcar e remover direto pelos botoes que "
     "aparecem no /lista e no /assistidos — marcar como assistido e remover "
-    "sempre pedem confirmacao antes de executar."
+    "sempre pedem confirmacao antes de executar.\n\n"
+    "<b>Em grupos:</b> por padrao o Telegram so deixa o bot ver mensagens "
+    "que sao comandos. Prints funcionam normalmente assim que voce "
+    "desativar o Modo Privacidade no @BotFather. Ja texto solto (sem "
+    "comando) so e tratado como titulo se for uma resposta direta a uma "
+    "mensagem do bot — assim conversa do grupo nao vira item da lista por "
+    "engano. Pra adicionar por texto num grupo, use /adicionar."
 )
 
 
@@ -379,9 +387,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await save_item_from_image(update, chat_id, buf)
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    title = update.message.text.strip()
+async def process_title_text(update: Update, chat_id: int, title: str) -> None:
+    title = title.strip()
     if not title:
         return
 
@@ -396,6 +403,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("Erro ao buscar informacoes do titulo")
 
     await save_item(update, chat_id, title, data)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Em grupos/canais, so tratamos texto solto como titulo se for resposta
+    # direta a uma mensagem do proprio bot (evita anotar conversa alheia
+    # como se fosse nome de filme). Em conversa privada, funciona sempre.
+    if update.effective_chat.type != "private":
+        replied = update.message.reply_to_message
+        is_reply_to_bot = bool(
+            replied and replied.from_user and replied.from_user.id == context.bot.id
+        )
+        if not is_reply_to_bot:
+            return
+
+    chat_id = update.effective_chat.id
+    await process_title_text(update, chat_id, update.message.text or "")
+
+
+async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Uso: /adicionar <nome do filme, serie ou anime>")
+        return
+    chat_id = update.effective_chat.id
+    title = " ".join(context.args)
+    await process_title_text(update, chat_id, title)
 
 
 # --- Navegacao interativa: por Plataforma ou por Genero --------------------
@@ -946,6 +978,7 @@ def main() -> None:
     app.add_handler(CommandHandler("assistidos", assistidos))
     app.add_handler(CommandHandler("historico", historico))
     app.add_handler(CommandHandler("todos", todos))
+    app.add_handler(CommandHandler("adicionar", adicionar))
     app.add_handler(CommandHandler("detalhes", detalhes))
     app.add_handler(CommandHandler("marcar", marcar))
     app.add_handler(CommandHandler("desmarcar", desmarcar))

@@ -278,9 +278,34 @@ pra abrir os detalhes daquele item.
 - `/remover <id>` — remove da lista (vai pro `/historico`, não apaga de vez).
   Diferente do botão, o comando direto não pede confirmação — digitar o ID
   exato já é uma ação deliberada.
+- `/adicionar <nome>` — adiciona um título por texto explicitamente
+  (principal jeito de adicionar por texto dentro de um grupo, veja a seção
+  abaixo).
 
 O número (`<id>`) de cada item aparece nas telas de detalhes e nas mensagens
 de confirmação quando você adiciona algo novo.
+
+## Usando o bot em um grupo
+
+Bots do Telegram nascem com o **Modo Privacidade** ligado: por padrão, eles
+só enxergam mensagens que são comandos (`/lista`, `/start`, etc.) dentro de
+um grupo — texto solto e fotos passam batido. Pra esse bot funcionar
+direito num grupo (reconhecer prints, por exemplo), você precisa desligar
+isso:
+
+1. Fale com o **@BotFather**
+2. Envie `/mybots`, escolha o bot, depois **Bot Settings** → **Group
+   Privacy** → **Turn off**
+3. Essa mudança só vale pra grupos em que o bot for adicionado *depois*
+   dela. Se o bot já estiver no grupo, remova ele e adicione de novo.
+
+Com o Modo Privacidade desligado, **prints continuam funcionando
+normalmente** em grupo, igual na conversa privada. A diferença é o texto
+solto: pra evitar que qualquer mensagem da conversa do grupo vire item da
+lista sem querer, texto sem comando só é tratado como título se for uma
+**resposta direta a uma mensagem do próprio bot**. Pra adicionar um título
+digitando o nome dentro de um grupo, use `/adicionar <nome>` — esse
+comando funciona em qualquer lugar, sem exigir resposta a nada.
 
 ## Estrutura do projeto
 
