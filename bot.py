@@ -113,6 +113,8 @@ HELP_TEXT = (
     "/genero &lt;id&gt; &lt;novo genero&gt; - corrigir o genero\n"
     "/plataforma &lt;id&gt; &lt;nova plataforma&gt; - corrigir onde assistir\n"
     "/remover &lt;id&gt; - remover (vai pro /historico, nao apaga de vez)\n"
+    "/limpartudo - remove todos os itens da lista de uma vez (pede "
+    "confirmacao, vai pro /historico)\n"
     "/adicionar &lt;nome&gt; - adicionar um titulo por texto (funciona em "
     "grupos)\n"
     "/recomendar &lt;descricao&gt; - pede uma recomendacao (ex: "
@@ -429,7 +431,9 @@ def item_button_label(row: sqlite3.Row) -> str:
 
 
 def all_items_button_label(row: sqlite3.Row) -> str:
-    status_icon = "✅" if row["status"] == "assistido" else "🍿"
+    # Telegram nao deixa colorir o texto do botao; usamos um circulo colorido
+    # como aproximacao visual: verde = assistido, amarelo = pendente.
+    status_icon = "🟢" if row["status"] == "assistido" else "🟡"
     genre_list = genres_of(row)
     genre = genre_list[0] if genre_list and genre_list[0] != UNKNOWN_GENRE else ""
     label = f"#{row['id']} {status_icon} {row['title']}"
@@ -1000,6 +1004,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     action = parts[0]
 
     try:
+        if action == "cwipecancel":
+            await query.answer("Cancelado")
+            await query.edit_message_text("Ok, nada foi removido.")
+            return
+
+        if action == "dwipe":
+            conn = get_conn()
+            cur = conn.execute(
+                "UPDATE items SET status = 'removido' WHERE chat_id = ? AND status != 'removido'",
+                (chat_id,),
+            )
+            conn.commit()
+            count = cur.rowcount
+            conn.close()
+            await query.answer("Lista limpa 🗑")
+            await query.edit_message_text(
+                f"🗑 {count} item(ns) removido(s). Todos ficaram guardados no /historico, "
+                f"da pra restaurar um por um se precisar."
+            )
+            return
+
         if action == "radd":
             token = parts[1]
             entry = _recommend_cache.pop(token, None)
@@ -1342,6 +1367,32 @@ async def remover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Nao achei esse ID na sua lista.")
 
 
+async def limpartudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    conn = get_conn()
+    total = conn.execute(
+        "SELECT COUNT(*) as cnt FROM items WHERE chat_id = ? AND status != 'removido'",
+        (chat_id,),
+    ).fetchone()["cnt"]
+    conn.close()
+
+    if not total:
+        await update.message.reply_text("Sua lista ja esta vazia.")
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"🗑 Sim, limpar os {total} itens", callback_data="dwipe")],
+            [InlineKeyboardButton("↩️ Cancelar", callback_data="cwipecancel")],
+        ]
+    )
+    await update.message.reply_html(
+        f"⚠️ Confirma remover <b>todos os {total} itens</b> da sua lista?\n"
+        f"<i>Ficam guardados no /historico, da pra restaurar um por um se precisar.</i>",
+        reply_markup=keyboard,
+    )
+
+
 REMINDER_STALE_DAYS = 30
 REMINDER_HOUR_UTC = 21  # ~18h no horario de Brasilia (UTC-3)
 
@@ -1394,6 +1445,7 @@ def main() -> None:
     app.add_handler(CommandHandler("genero", genero))
     app.add_handler(CommandHandler("plataforma", plataforma))
     app.add_handler(CommandHandler("remover", remover))
+    app.add_handler(CommandHandler("limpartudo", limpartudo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))

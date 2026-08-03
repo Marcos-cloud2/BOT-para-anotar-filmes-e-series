@@ -283,11 +283,12 @@ pra abrir os detalhes daquele item.
 
 **Navegar pela lista:**
 - `/todos` mostra tudo numa lista só, sem etapas — cada botão já vem com o
-  número (`#id`), gênero e um marcador de status (🍿 pra assistir, ✅
-  assistido) na frente do título. Toca no título e abre a sinopse
-  completa, com os mesmos botões de marcar/remover das outras telas. Com
-  mais de 10 itens, aparecem botões "Anterior"/"Próxima" pra navegar entre
-  páginas.
+  número (`#id`), gênero e um círculo colorido de status (🟡 pra assistir,
+  🟢 assistido — o Telegram não deixa colorir o texto do botão em si, essa
+  é a aproximação mais próxima disso) na frente do título. Toca no título
+  e abre a sinopse completa, com os mesmos botões de marcar/remover das
+  outras telas. Com mais de 10 itens, aparecem botões
+  "Anterior"/"Próxima" pra navegar entre páginas.
 - `/lista` pergunta primeiro: navegar **por plataforma** ou **por gênero**?
   - Por plataforma: você toca na plataforma de streaming, depois na
     categoria (Filme, Série ou Anime), depois no gênero, até chegar no
@@ -322,6 +323,9 @@ pra abrir os detalhes daquele item.
 - `/remover <id>` — remove da lista (vai pro `/historico`, não apaga de vez).
   Diferente do botão, o comando direto não pede confirmação — digitar o ID
   exato já é uma ação deliberada.
+- `/limpartudo` — remove todos os itens da lista de uma vez, com
+  confirmação antes. Igual ao `/remover`, não apaga de vez: tudo vai pro
+  `/historico`, então dá pra restaurar item por item se precisar.
 - `/adicionar <nome>` — adiciona um título por texto explicitamente
   (principal jeito de adicionar por texto dentro de um grupo, veja a seção
   abaixo).
